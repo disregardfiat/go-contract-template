@@ -2,6 +2,7 @@ package main
 
 import (
 	"contract-template/sdk"
+	"math/bits"
 	"strconv"
 	"strings"
 )
@@ -21,13 +22,19 @@ const (
 	v3KeyFeeGrowth1  = v3KeyPrefix + "fee_growth1_q32"
 	v3KeyFeeAcc0     = v3KeyPrefix + "fee_acc0"
 	v3KeyFeeAcc1     = v3KeyPrefix + "fee_acc1"
+	v3KeyPaused      = v3KeyPrefix + "paused"
+	v3KeyReentrancy  = v3KeyPrefix + "reentrancy"
 )
 
 const qShift = 32
 
 func qMul(a, b uint64) uint64 {
-	// (a * b) >> qShift, with limited overflow checking
-	return (a / (1 << (qShift / 2))) * (b / (1 << (qShift / 2)))
+	// (a*b)>>qShift using 128-bit multiply
+	hi, lo := bits.Mul64(a, b)
+	if qShift == 0 {
+		return lo
+	}
+	return (hi << qShift) | (lo >> qShift)
 }
 
 func qDiv(a, b uint64) uint64 {
@@ -90,12 +97,27 @@ func InitV3(arg *string) *string {
 	v3setU(v3KeyFeeGrowth1, 0)
 	v3setU(v3KeyFeeAcc0, 0)
 	v3setU(v3KeyFeeAcc1, 0)
+	v3setU(v3KeyPaused, 0)
+	v3setU(v3KeyReentrancy, 0)
 	return nil
 }
 
 func getAssetsV3() (sdk.Asset, sdk.Asset) {
 	return sdk.Asset(v3getStr(v3KeyAsset0)), sdk.Asset(v3getStr(v3KeyAsset1))
 }
+
+func v3RequireNotPaused() {
+	if v3getU(v3KeyPaused) != 0 {
+		panic("paused")
+	}
+}
+func v3Enter() {
+	if v3getU(v3KeyReentrancy) != 0 {
+		panic("reentrancy")
+	}
+	v3setU(v3KeyReentrancy, 1)
+}
+func v3Exit() { v3setU(v3KeyReentrancy, 0) }
 
 func updatePositionOwed(owner sdk.Address, lower, upper uint64) {
 	L := v3getU(v3posKey(owner, lower, upper, "liquidity"))
@@ -127,7 +149,7 @@ func getLiquidityForAmount0(sqrtA, sqrtB, amount0 uint64) uint64 {
 	if sqrtA > sqrtB {
 		sqrtA, sqrtB = sqrtB, sqrtA
 	}
-	num := qMul(qMul(amount0<<qShift, sqrtA), sqrtB) // amount0 * (sqrtA*sqrtB)
+	num := qMul(qMul(amount0<<qShift, sqrtA), sqrtB) // safe Q math
 	den := (sqrtB - sqrtA)
 	return num / den >> qShift
 }
@@ -148,7 +170,7 @@ func amountOwedFromLiquidity(liq, sqrtA, sqrtB, sqrtP uint64) (amt0, amt1 uint64
 	if sqrtP <= sqrtA {
 		// entirely in token0 side
 		num := liq * (sqrtB - sqrtA)
-		prod := qMul(sqrtA, sqrtB) // (sqrtA*sqrtB) >> Q
+		prod := qMul(sqrtA, sqrtB)
 		if prod == 0 {
 			return 0, 0
 		}
@@ -174,6 +196,9 @@ func amountOwedFromLiquidity(liq, sqrtA, sqrtB, sqrtP uint64) (amt0, amt1 uint64
 
 //go:wasmexport mint_v3
 func MintV3(arg *string) *string {
+	v3RequireNotPaused()
+	v3Enter()
+	defer v3Exit()
 	// args: lower_q32,upper_q32,amount0,amount1
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 4 {
@@ -218,6 +243,9 @@ func MintV3(arg *string) *string {
 
 //go:wasmexport burn_v3
 func BurnV3(arg *string) *string {
+	v3RequireNotPaused()
+	v3Enter()
+	defer v3Exit()
 	// args: lower_q32,upper_q32,liquidity
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 3 {
@@ -251,6 +279,9 @@ func BurnV3(arg *string) *string {
 
 //go:wasmexport collect_v3
 func CollectV3(arg *string) *string {
+	v3RequireNotPaused()
+	v3Enter()
+	defer v3Exit()
 	// args: lower_q32,upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 {
@@ -316,18 +347,29 @@ func SetActiveRangeV3(arg *string) *string {
 
 //go:wasmexport swap_v3
 func SwapV3(arg *string) *string {
-	// args: dir,amountIn  dir in {0to1,1to0}
+	// args: dir,amountIn(,minOut)
 	p := strings.Split(strings.TrimSpace(*arg), ",")
-	if len(p) != 2 {
+	if len(p) != 2 && len(p) != 3 {
 		panic("invalid args")
 	}
 	dir := p[0]
 	amtIn, _ := strconv.ParseUint(p[1], 10, 64)
+	minOut := uint64(0)
+	if len(p) == 3 && p[2] != "" {
+		m, _ := strconv.ParseUint(p[2], 10, 64)
+		minOut = m
+	}
+	v3RequireNotPaused()
+	v3Enter()
+	defer v3Exit()
 	feeBps := v3getU(v3KeyFeeBps)
 	sqrtP := v3getU(v3KeySqrtP)
 	L := v3getU(v3KeyLiquidity)
 	if L == 0 {
 		panic("no liquidity")
+	}
+	if sqrtP == 0 {
+		panic("bad price")
 	}
 	lower := v3getU(v3KeyActiveLower)
 	upper := v3getU(v3KeyActiveUpper)
@@ -363,6 +405,9 @@ func SwapV3(arg *string) *string {
 		// draw in
 		sdk.HiveDraw(int64(amtIn), a0)
 		// send out
+		if out < minOut {
+			panic("slippage")
+		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a1)
 		v3setU(v3KeyFeeAcc0, v3getU(v3KeyFeeAcc0)+fee)
 	} else {
@@ -379,8 +424,24 @@ func SwapV3(arg *string) *string {
 		v3setU(v3KeySqrtP, newSqrt)
 		a0, a1 := getAssetsV3()
 		sdk.HiveDraw(int64(amtIn), a1)
+		if out < minOut {
+			panic("slippage")
+		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a0)
 		v3setU(v3KeyFeeAcc1, v3getU(v3KeyFeeAcc1)+fee)
 	}
+	return nil
+}
+
+//go:wasmexport set_paused_v3
+func SetPausedV3(arg *string) *string {
+	if !isSystemSender() {
+		panic("only system")
+	}
+	v, _ := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
+	if v != 0 && v != 1 {
+		panic("bad pause")
+	}
+	v3setU(v3KeyPaused, v)
 	return nil
 }

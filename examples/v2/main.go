@@ -3,6 +3,7 @@ package main
 import (
 	"contract-template/sdk"
 	_ "contract-template/sdk"
+	"math/bits"
 	"strconv"
 	"strings"
 )
@@ -22,6 +23,8 @@ const (
 	keyFeeClaimIntervalS = "pool/fee_claim_interval_s"
 	keyTotalLP           = "pool/total_lp"
 	keyLPPrefix          = "lps/" // lps/<address>
+	keyPaused            = "pool/paused"
+	keyReentrancy        = "pool/reentrancy"
 )
 
 const (
@@ -99,6 +102,36 @@ func sqrt64(x uint64) uint64 {
 	return z
 }
 
+// sqrt128 returns floor(sqrt(hi:lo)) where hi:lo is a 128-bit unsigned integer
+func sqrt128(hi, lo uint64) uint64 {
+	var low, high uint64 = 0, ^uint64(0) >> 1
+	var ans uint64
+	for low <= high {
+		mid := (low + high) >> 1
+		mh, ml := bits.Mul64(mid, mid)
+		if mh < hi || (mh == hi && ml <= lo) {
+			ans = mid
+			low = mid + 1
+		} else {
+			high = mid - 1
+		}
+	}
+	return ans
+}
+
+func parseUintStrict(s string) uint64 {
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		panic("bad uint")
+	}
+	return v
+}
+
+func requireNotPaused() { assert(getUint(keyPaused) == 0) }
+
+func enterReentrancy() { assert(getUint(keyReentrancy) == 0); setUint(keyReentrancy, 1) }
+func exitReentrancy()  { setUint(keyReentrancy, 0) }
+
 func lpKey(addr sdk.Address) string {
 	return keyLPPrefix + addr.String()
 }
@@ -148,9 +181,7 @@ func Init(payload *string) *string {
 
 	base := uint64(defaultBaseFeeBps)
 	if len(parts) >= 3 && parts[2] != "" {
-		if v, err := strconv.ParseUint(parts[2], 10, 64); err == nil {
-			base = v
-		}
+		base = parseUintStrict(parts[2])
 	}
 	setUint(keyBaseFeeBps, base)
 	setUint(keyTotalLP, 0)
@@ -160,6 +191,8 @@ func Init(payload *string) *string {
 	setInt(keyFee1, 0)
 	setUint(keyFeeClaimIntervalS, defaultFeeClaimIntervalS)
 	setStr(keyFeeLastClaimUnix, sdk.GetEnv().Timestamp)
+	setUint(keyPaused, 0)
+	setUint(keyReentrancy, 0)
 
 	return nil
 }
@@ -169,10 +202,13 @@ func Init(payload *string) *string {
 //
 //go:wasmexport add_liquidity
 func AddLiquidity(payload *string) *string {
+	requireNotPaused()
+	enterReentrancy()
+	defer exitReentrancy()
 	params := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(params) == 2)
-	amt0U, _ := strconv.ParseUint(params[0], 10, 64)
-	amt1U, _ := strconv.ParseUint(params[1], 10, 64)
+	amt0U := parseUintStrict(params[0])
+	amt1U := parseUintStrict(params[1])
 
 	asset0, asset1 := getAssets()
 	// Pull funds from user intents into contract
@@ -190,8 +226,9 @@ func AddLiquidity(payload *string) *string {
 
 	var minted uint64
 	if totalLP == 0 {
-		// geometric mean
-		minted = sqrt64(amt0U * amt1U)
+		// geometric mean using 128-bit product
+		hi, lo := bits.Mul64(amt0U, amt1U)
+		minted = sqrt128(hi, lo)
 	} else {
 		// proportional
 		m0 := amt0U * totalLP / r0
@@ -218,6 +255,9 @@ func AddLiquidity(payload *string) *string {
 //
 //go:wasmexport remove_liquidity
 func RemoveLiquidity(payload *string) *string {
+	requireNotPaused()
+	enterReentrancy()
+	defer exitReentrancy()
 	lpToBurnU, _ := strconv.ParseUint(strings.TrimSpace(*payload), 10, 64)
 	env := sdk.GetEnv()
 	userLP := getLP(env.Sender.Address)
@@ -252,10 +292,17 @@ func RemoveLiquidity(payload *string) *string {
 //
 //go:wasmexport swap
 func Swap(payload *string) *string {
+	requireNotPaused()
+	enterReentrancy()
+	defer exitReentrancy()
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
-	assert(len(parts) == 2)
+	assert(len(parts) == 2 || len(parts) == 3)
 	dir := parts[0]
-	amountInU, _ := strconv.ParseUint(parts[1], 10, 64)
+	amountInU := parseUintStrict(parts[1])
+	minOutU := uint64(0)
+	if len(parts) == 3 && parts[2] != "" {
+		minOutU = parseUintStrict(parts[2])
+	}
 	assert(amountInU > 0)
 
 	feeBps := getUint(keyBaseFeeBps)
@@ -263,6 +310,7 @@ func Swap(payload *string) *string {
 
 	r0 := uint64(getInt(keyReserve0))
 	r1 := uint64(getInt(keyReserve1))
+	assert(r0 > 0 && r1 > 0)
 	asset0, asset1 := getAssets()
 
 	if dir == "0to1" {
@@ -274,8 +322,10 @@ func Swap(payload *string) *string {
 		k := r0 * r1
 		newX := r0 + dxEff
 		assert(newX > 0)
+		assert(k > 0)
 		dy := r1 - (k / newX)
 		assert(dy > 0 && dy < r1)
+		assert(uint64(dy) >= minOutU)
 
 		// update reserves: only effective input increases reserve
 		setInt(keyReserve0, int64(r0+dxEff))
@@ -291,8 +341,10 @@ func Swap(payload *string) *string {
 		k := r0 * r1
 		newY := r1 + dxEff
 		assert(newY > 0)
+		assert(k > 0)
 		dxOut := r0 - (k / newY)
 		assert(dxOut > 0 && dxOut < r0)
+		assert(uint64(dxOut) >= minOutU)
 
 		// only effective input increases reserve
 		setInt(keyReserve1, int64(r1+dxEff))
@@ -311,6 +363,9 @@ func Swap(payload *string) *string {
 //
 //go:wasmexport donate
 func Donate(payload *string) *string {
+	requireNotPaused()
+	enterReentrancy()
+	defer exitReentrancy()
 	params := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(params) == 2)
 	amt0U, _ := strconv.ParseUint(params[0], 10, 64)
@@ -331,6 +386,7 @@ func Donate(payload *string) *string {
 //
 //go:wasmexport claim_fees
 func ClaimFees(_ *string) *string {
+	assert(isSystemSender())
 	systemFR := sdk.Address("system:fr_balance")
 	a0, a1 := getAssets()
 	f0 := getInt(keyFee0)
@@ -353,6 +409,7 @@ func ClaimFees(_ *string) *string {
 //
 //go:wasmexport burn
 func Burn(payload *string) *string {
+	requireNotPaused()
 	amt, _ := strconv.ParseUint(strings.TrimSpace(*payload), 10, 64)
 	env := sdk.GetEnv()
 	bal := getLP(env.Sender.Address)
@@ -368,6 +425,7 @@ func Burn(payload *string) *string {
 //
 //go:wasmexport transfer
 func Transfer(payload *string) *string {
+	requireNotPaused()
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(parts) == 2)
 	to := sdk.Address(parts[0])
@@ -386,6 +444,9 @@ func Transfer(payload *string) *string {
 //go:wasmexport si_withdraw
 func SIWithdraw(payload *string) *string {
 	assert(isSystemSender())
+	requireNotPaused()
+	enterReentrancy()
+	defer exitReentrancy()
 	// burn from all LP proportionally is complex; here we burn from caller-specified LP (system must specify address and amount)
 	// For simplicity, we accept "address,lpAmount" here.
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
@@ -428,5 +489,17 @@ func SetBaseFee(payload *string) *string {
 	v, _ := strconv.ParseUint(strings.TrimSpace(*payload), 10, 64)
 	assert(v <= 10_000)
 	setUint(keyBaseFeeBps, v)
+	return nil
+}
+
+// System function: pause/unpause
+// Payload: "0|1"
+//
+//go:wasmexport set_paused
+func SetPaused(payload *string) *string {
+	assert(isSystemSender())
+	v := parseUintStrict(strings.TrimSpace(*payload))
+	assert(v == 0 || v == 1)
+	setUint(keyPaused, v)
 	return nil
 }

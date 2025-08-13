@@ -5,44 +5,9 @@ import (
 	"strconv"
 )
 
-//go:wasmimport sdk console.log
-func log(s *string) *string
-
 func Log(s string) {
 	log(&s)
 }
-
-//go:wasmimport sdk db.setObject
-func stateSetObject(key *string, value *string) *string
-
-//go:wasmimport sdk db.getObject
-func stateGetObject(key *string) *string
-
-//go:wasmimport sdk db.delObject
-func stateDeleteObject(key *string) *string
-
-//go:wasmimport sdk system.getEnv
-func getEnv(arg *string) *string
-
-//go:wasmimport sdk hive.getbalance
-func getBalance(arg1 *string, arg2 *string) *string
-
-//go:wasmimport sdk hive.draw
-func hiveDraw(arg1 *string, arg2 *string) *string
-
-//go:wasmimport sdk hive.transfer
-func hiveTransfer(arg1 *string, arg2 *string, arg3 *string) *string
-
-//go:wasmimport sdk hive.withdraw
-func hiveWithdraw(arg1 *string, arg2 *string, arg3 *string) *string
-
-// /TODO: this is not implemented yet
-// /go:wasmimport sdk contracts.read
-func contractRead(contractId *string, key *string) *string
-
-// /TODO: this is not implemented yet
-// /go:wasmimport sdk contracts.call
-func contractCall(contractId *string, method *string, payload *string, options *string) *string
 
 // var envMap = []string{
 // 	"contract.id",
