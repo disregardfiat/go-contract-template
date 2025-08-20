@@ -10,20 +10,18 @@ import (
 // Minimal v3-style AMM with a single active price range and per-position fee growth snapshots.
 
 const (
-	v3KeyPrefix      = "v3/"
-	v3KeyAsset0      = v3KeyPrefix + "asset0"
-	v3KeyAsset1      = v3KeyPrefix + "asset1"
-	v3KeyFeeBps      = v3KeyPrefix + "fee_bps"
-	v3KeySqrtP       = v3KeyPrefix + "sqrt_price_q32"
-	v3KeyLiquidity   = v3KeyPrefix + "liquidity"
-	v3KeyActiveLower = v3KeyPrefix + "active_lower_q32"
-	v3KeyActiveUpper = v3KeyPrefix + "active_upper_q32"
-	v3KeyFeeGrowth0  = v3KeyPrefix + "fee_growth0_q32"
-	v3KeyFeeGrowth1  = v3KeyPrefix + "fee_growth1_q32"
-	v3KeyFeeAcc0     = v3KeyPrefix + "fee_acc0"
-	v3KeyFeeAcc1     = v3KeyPrefix + "fee_acc1"
-	v3KeyPaused      = v3KeyPrefix + "paused"
-	v3KeyReentrancy  = v3KeyPrefix + "reentrancy"
+	KeyAsset0      = "asset0"
+	KeyAsset1      = "asset1"
+	KeyFeeBps      = "fee_bps"
+	KeySqrtP       = "sqrt_price_q32"
+	KeyLiquidity   = "liquidity"
+	KeyActiveLower = "active_lower_q32"
+	KeyActiveUpper = "active_upper_q32"
+	KeyFeeGrowth0  = "fee_growth0_q32"
+	KeyFeeGrowth1  = "fee_growth1_q32"
+	KeyFeeAcc0     = "fee_acc0"
+	KeyFeeAcc1     = "fee_acc1"
+	KeyPaused      = "paused"
 )
 
 const qShift = 32
@@ -51,96 +49,88 @@ func minU64(a, b uint64) uint64 {
 	return b
 }
 
-func v3getStr(key string) string {
+func getStr(key string) string {
 	v := sdk.StateGetObject(key)
 	if v == nil {
 		return ""
 	}
 	return *v
 }
-func v3setStr(key, v string) { sdk.StateSetObject(key, v) }
-func v3getU(key string) uint64 {
-	s := v3getStr(key)
+func setStr(key, v string) { sdk.StateSetObject(key, v) }
+func getU(key string) uint64 {
+	s := getStr(key)
 	if s == "" {
 		return 0
 	}
 	n, _ := strconv.ParseUint(s, 10, 64)
 	return n
 }
-func v3setU(key string, v uint64) { sdk.StateSetObject(key, strconv.FormatUint(v, 10)) }
-func v3posKey(addr sdk.Address, lower, upper uint64, suffix string) string {
-	return v3KeyPrefix + "pos/" + addr.String() + "/" + strconv.FormatUint(lower, 10) + "/" + strconv.FormatUint(upper, 10) + "/" + suffix
+func setU(key string, v uint64) { sdk.StateSetObject(key, strconv.FormatUint(v, 10)) }
+func posKey(addr sdk.Address, lower, upper uint64, suffix string) string {
+	return "pos/" + addr.String() + "/" + strconv.FormatUint(lower, 10) + "/" + strconv.FormatUint(upper, 10) + "/" + suffix
 }
 
-//go:wasmexport init_v3
-func InitV3(arg *string) *string {
+//go:wasmexport init
+func Init(arg *string) *string {
 	// args: asset0,asset1,fee_bps,init_sqrt_q32,active_lower_q32,active_upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) < 6 {
 		panic("invalid args")
 	}
-	v3setStr(v3KeyAsset0, p[0])
-	v3setStr(v3KeyAsset1, p[1])
+	setStr(KeyAsset0, p[0])
+	setStr(KeyAsset1, p[1])
 	feeBps, _ := strconv.ParseUint(p[2], 10, 64)
-	v3setU(v3KeyFeeBps, feeBps)
+	setU(KeyFeeBps, feeBps)
 	sqrtP, _ := strconv.ParseUint(p[3], 10, 64)
-	v3setU(v3KeySqrtP, sqrtP)
+	setU(KeySqrtP, sqrtP)
 	lower, _ := strconv.ParseUint(p[4], 10, 64)
 	upper, _ := strconv.ParseUint(p[5], 10, 64)
 	if !(lower < sqrtP && sqrtP < upper) {
 		panic("price not within active range")
 	}
-	v3setU(v3KeyActiveLower, lower)
-	v3setU(v3KeyActiveUpper, upper)
-	v3setU(v3KeyLiquidity, 0)
-	v3setU(v3KeyFeeGrowth0, 0)
-	v3setU(v3KeyFeeGrowth1, 0)
-	v3setU(v3KeyFeeAcc0, 0)
-	v3setU(v3KeyFeeAcc1, 0)
-	v3setU(v3KeyPaused, 0)
-	v3setU(v3KeyReentrancy, 0)
+	setU(KeyActiveLower, lower)
+	setU(KeyActiveUpper, upper)
+	setU(KeyLiquidity, 0)
+	setU(KeyFeeGrowth0, 0)
+	setU(KeyFeeGrowth1, 0)
+	setU(KeyFeeAcc0, 0)
+	setU(KeyFeeAcc1, 0)
+	setU(KeyPaused, 0)
 	return nil
 }
 
-func getAssetsV3() (sdk.Asset, sdk.Asset) {
-	return sdk.Asset(v3getStr(v3KeyAsset0)), sdk.Asset(v3getStr(v3KeyAsset1))
+func getAssets() (sdk.Asset, sdk.Asset) {
+	return sdk.Asset(getStr(KeyAsset0)), sdk.Asset(getStr(KeyAsset1))
 }
 
-func v3RequireNotPaused() {
-	if v3getU(v3KeyPaused) != 0 {
+func RequireNotPaused() {
+	if getU(KeyPaused) != 0 {
 		panic("paused")
 	}
 }
-func v3Enter() {
-	if v3getU(v3KeyReentrancy) != 0 {
-		panic("reentrancy")
-	}
-	v3setU(v3KeyReentrancy, 1)
-}
-func v3Exit() { v3setU(v3KeyReentrancy, 0) }
 
 func updatePositionOwed(owner sdk.Address, lower, upper uint64) {
-	L := v3getU(v3posKey(owner, lower, upper, "liquidity"))
+	L := getU(posKey(owner, lower, upper, "liquidity"))
 	if L == 0 {
 		return
 	}
-	fg0 := v3getU(v3KeyFeeGrowth0)
-	fg1 := v3getU(v3KeyFeeGrowth1)
-	last0 := v3getU(v3posKey(owner, lower, upper, "fg0_last"))
-	last1 := v3getU(v3posKey(owner, lower, upper, "fg1_last"))
+	fg0 := getU(KeyFeeGrowth0)
+	fg1 := getU(KeyFeeGrowth1)
+	last0 := getU(posKey(owner, lower, upper, "fg0_last"))
+	last1 := getU(posKey(owner, lower, upper, "fg1_last"))
 	if fg0 > last0 {
 		delta := fg0 - last0
-		owed := v3getU(v3posKey(owner, lower, upper, "owed0"))
+		owed := getU(posKey(owner, lower, upper, "owed0"))
 		owed += (delta * L) >> qShift
-		v3setU(v3posKey(owner, lower, upper, "owed0"), owed)
-		v3setU(v3posKey(owner, lower, upper, "fg0_last"), fg0)
+		setU(posKey(owner, lower, upper, "owed0"), owed)
+		setU(posKey(owner, lower, upper, "fg0_last"), fg0)
 	}
 	if fg1 > last1 {
 		delta := fg1 - last1
-		owed := v3getU(v3posKey(owner, lower, upper, "owed1"))
+		owed := getU(posKey(owner, lower, upper, "owed1"))
 		owed += (delta * L) >> qShift
-		v3setU(v3posKey(owner, lower, upper, "owed1"), owed)
-		v3setU(v3posKey(owner, lower, upper, "fg1_last"), fg1)
+		setU(posKey(owner, lower, upper, "owed1"), owed)
+		setU(posKey(owner, lower, upper, "fg1_last"), fg1)
 	}
 }
 
@@ -194,11 +184,9 @@ func amountOwedFromLiquidity(liq, sqrtA, sqrtB, sqrtP uint64) (amt0, amt1 uint64
 	return
 }
 
-//go:wasmexport mint_v3
-func MintV3(arg *string) *string {
-	v3RequireNotPaused()
-	v3Enter()
-	defer v3Exit()
+//go:wasmexport mint
+func Mint(arg *string) *string {
+	RequireNotPaused()
 	// args: lower_q32,upper_q32,amount0,amount1
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 4 {
@@ -210,11 +198,11 @@ func MintV3(arg *string) *string {
 	amt1, _ := strconv.ParseUint(p[3], 10, 64)
 
 	// enforce single active range for now
-	if lower != v3getU(v3KeyActiveLower) || upper != v3getU(v3KeyActiveUpper) {
+	if lower != getU(KeyActiveLower) || upper != getU(KeyActiveUpper) {
 		panic("range must equal active range")
 	}
 
-	sqrtP := v3getU(v3KeySqrtP)
+	sqrtP := getU(KeySqrtP)
 	L0 := getLiquidityForAmount0(sqrtP, upper, amt0)
 	L1 := getLiquidityForAmount1(lower, sqrtP, amt1)
 	L := minU64(L0, L1)
@@ -222,7 +210,7 @@ func MintV3(arg *string) *string {
 		panic("zero L")
 	}
 
-	a0, a1 := getAssetsV3()
+	a0, a1 := getAssets()
 	if amt0 > 0 {
 		sdk.HiveDraw(int64(amt0), a0)
 	}
@@ -232,20 +220,18 @@ func MintV3(arg *string) *string {
 
 	env := sdk.GetEnv()
 	updatePositionOwed(env.Sender.Address, lower, upper)
-	curL := v3getU(v3posKey(env.Sender.Address, lower, upper, "liquidity"))
-	v3setU(v3posKey(env.Sender.Address, lower, upper, "liquidity"), curL+L)
-	v3setU(v3posKey(env.Sender.Address, lower, upper, "fg0_last"), v3getU(v3KeyFeeGrowth0))
-	v3setU(v3posKey(env.Sender.Address, lower, upper, "fg1_last"), v3getU(v3KeyFeeGrowth1))
+	curL := getU(posKey(env.Sender.Address, lower, upper, "liquidity"))
+	setU(posKey(env.Sender.Address, lower, upper, "liquidity"), curL+L)
+	setU(posKey(env.Sender.Address, lower, upper, "fg0_last"), getU(KeyFeeGrowth0))
+	setU(posKey(env.Sender.Address, lower, upper, "fg1_last"), getU(KeyFeeGrowth1))
 
-	v3setU(v3KeyLiquidity, v3getU(v3KeyLiquidity)+L)
+	setU(KeyLiquidity, getU(KeyLiquidity)+L)
 	return nil
 }
 
-//go:wasmexport burn_v3
-func BurnV3(arg *string) *string {
-	v3RequireNotPaused()
-	v3Enter()
-	defer v3Exit()
+//go:wasmexport burn
+func Burn(arg *string) *string {
+	RequireNotPaused()
 	// args: lower_q32,upper_q32,liquidity
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 3 {
@@ -257,31 +243,29 @@ func BurnV3(arg *string) *string {
 
 	env := sdk.GetEnv()
 	updatePositionOwed(env.Sender.Address, lower, upper)
-	curL := v3getU(v3posKey(env.Sender.Address, lower, upper, "liquidity"))
+	curL := getU(posKey(env.Sender.Address, lower, upper, "liquidity"))
 	if liq == 0 || liq > curL {
 		panic("bad liq")
 	}
 	// Accrue underlying owed for removed liquidity at current price
-	sqrtP := v3getU(v3KeySqrtP)
+	sqrtP := getU(KeySqrtP)
 	owed0, owed1 := amountOwedFromLiquidity(liq, lower, upper, sqrtP)
 	if owed0 > 0 {
-		cur := v3getU(v3posKey(env.Sender.Address, lower, upper, "owed0"))
-		v3setU(v3posKey(env.Sender.Address, lower, upper, "owed0"), cur+owed0)
+		cur := getU(posKey(env.Sender.Address, lower, upper, "owed0"))
+		setU(posKey(env.Sender.Address, lower, upper, "owed0"), cur+owed0)
 	}
 	if owed1 > 0 {
-		cur := v3getU(v3posKey(env.Sender.Address, lower, upper, "owed1"))
-		v3setU(v3posKey(env.Sender.Address, lower, upper, "owed1"), cur+owed1)
+		cur := getU(posKey(env.Sender.Address, lower, upper, "owed1"))
+		setU(posKey(env.Sender.Address, lower, upper, "owed1"), cur+owed1)
 	}
-	v3setU(v3posKey(env.Sender.Address, lower, upper, "liquidity"), curL-liq)
-	v3setU(v3KeyLiquidity, v3getU(v3KeyLiquidity)-liq)
+	setU(posKey(env.Sender.Address, lower, upper, "liquidity"), curL-liq)
+	setU(KeyLiquidity, getU(KeyLiquidity)-liq)
 	return nil
 }
 
-//go:wasmexport collect_v3
-func CollectV3(arg *string) *string {
-	v3RequireNotPaused()
-	v3Enter()
-	defer v3Exit()
+//go:wasmexport collect
+func Collect(arg *string) *string {
+	RequireNotPaused()
 	// args: lower_q32,upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 {
@@ -291,16 +275,16 @@ func CollectV3(arg *string) *string {
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
 	env := sdk.GetEnv()
 	updatePositionOwed(env.Sender.Address, lower, upper)
-	owed0 := v3getU(v3posKey(env.Sender.Address, lower, upper, "owed0"))
-	owed1 := v3getU(v3posKey(env.Sender.Address, lower, upper, "owed1"))
+	owed0 := getU(posKey(env.Sender.Address, lower, upper, "owed0"))
+	owed1 := getU(posKey(env.Sender.Address, lower, upper, "owed1"))
 	if owed0 > 0 {
-		v3setU(v3posKey(env.Sender.Address, lower, upper, "owed0"), 0)
-		a0, _ := getAssetsV3()
+		setU(posKey(env.Sender.Address, lower, upper, "owed0"), 0)
+		a0, _ := getAssets()
 		sdk.HiveTransfer(env.Sender.Address, int64(owed0), a0)
 	}
 	if owed1 > 0 {
-		v3setU(v3posKey(env.Sender.Address, lower, upper, "owed1"), 0)
-		_, a1 := getAssetsV3()
+		setU(posKey(env.Sender.Address, lower, upper, "owed1"), 0)
+		_, a1 := getAssets()
 		sdk.HiveTransfer(env.Sender.Address, int64(owed1), a1)
 	}
 	return nil
@@ -312,8 +296,8 @@ func isSystemSender() bool {
 	return env.Sender.Address.Domain() == sdk.AddressDomainSystem
 }
 
-//go:wasmexport set_fee_v3
-func SetFeeV3(arg *string) *string {
+//go:wasmexport set_fee
+func SetFee(arg *string) *string {
 	if !isSystemSender() {
 		panic("only system")
 	}
@@ -321,12 +305,12 @@ func SetFeeV3(arg *string) *string {
 	if v > 10_000 {
 		panic("bad bps")
 	}
-	v3setU(v3KeyFeeBps, v)
+	setU(KeyFeeBps, v)
 	return nil
 }
 
-//go:wasmexport set_active_range_v3
-func SetActiveRangeV3(arg *string) *string {
+//go:wasmexport set_active_range
+func SetActiveRange(arg *string) *string {
 	if !isSystemSender() {
 		panic("only system")
 	}
@@ -336,17 +320,17 @@ func SetActiveRangeV3(arg *string) *string {
 	}
 	lower, _ := strconv.ParseUint(p[0], 10, 64)
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
-	sqrtP := v3getU(v3KeySqrtP)
+	sqrtP := getU(KeySqrtP)
 	if !(lower < sqrtP && sqrtP < upper) {
 		panic("price not within new range")
 	}
-	v3setU(v3KeyActiveLower, lower)
-	v3setU(v3KeyActiveUpper, upper)
+	setU(KeyActiveLower, lower)
+	setU(KeyActiveUpper, upper)
 	return nil
 }
 
-//go:wasmexport swap_v3
-func SwapV3(arg *string) *string {
+//go:wasmexport swap
+func Swap(arg *string) *string {
 	// args: dir,amountIn(,minOut)
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 && len(p) != 3 {
@@ -359,30 +343,28 @@ func SwapV3(arg *string) *string {
 		m, _ := strconv.ParseUint(p[2], 10, 64)
 		minOut = m
 	}
-	v3RequireNotPaused()
-	v3Enter()
-	defer v3Exit()
-	feeBps := v3getU(v3KeyFeeBps)
-	sqrtP := v3getU(v3KeySqrtP)
-	L := v3getU(v3KeyLiquidity)
+	RequireNotPaused()
+	feeBps := getU(KeyFeeBps)
+	sqrtP := getU(KeySqrtP)
+	L := getU(KeyLiquidity)
 	if L == 0 {
 		panic("no liquidity")
 	}
 	if sqrtP == 0 {
 		panic("bad price")
 	}
-	lower := v3getU(v3KeyActiveLower)
-	upper := v3getU(v3KeyActiveUpper)
+	lower := getU(KeyActiveLower)
+	upper := getU(KeyActiveUpper)
 
 	fee := amtIn * feeBps / 10_000
 	eff := amtIn - fee
 	// distribute fee via fee growth per liquidity
 	if dir == "0to1" {
-		fg0 := v3getU(v3KeyFeeGrowth0) + ((fee << qShift) / L)
-		v3setU(v3KeyFeeGrowth0, fg0)
+		fg0 := getU(KeyFeeGrowth0) + ((fee << qShift) / L)
+		setU(KeyFeeGrowth0, fg0)
 	} else if dir == "1to0" {
-		fg1 := v3getU(v3KeyFeeGrowth1) + ((fee << qShift) / L)
-		v3setU(v3KeyFeeGrowth1, fg1)
+		fg1 := getU(KeyFeeGrowth1) + ((fee << qShift) / L)
+		setU(KeyFeeGrowth1, fg1)
 	} else {
 		panic("dir")
 	}
@@ -400,8 +382,8 @@ func SwapV3(arg *string) *string {
 		// dy = L * (sqrt - sqrt')
 		diff := sqrtP - newSqrt
 		out = (L * diff) >> qShift
-		v3setU(v3KeySqrtP, newSqrt)
-		a0, a1 := getAssetsV3()
+		setU(KeySqrtP, newSqrt)
+		a0, a1 := getAssets()
 		// draw in
 		sdk.HiveDraw(int64(amtIn), a0)
 		// send out
@@ -409,7 +391,7 @@ func SwapV3(arg *string) *string {
 			panic("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a1)
-		v3setU(v3KeyFeeAcc0, v3getU(v3KeyFeeAcc0)+fee)
+		setU(KeyFeeAcc0, getU(KeyFeeAcc0)+fee)
 	} else {
 		// sqrt' = sqrt + dy/L
 		inc := qDiv(eff<<qShift, L)
@@ -421,20 +403,20 @@ func SwapV3(arg *string) *string {
 		invNew := qDiv(1<<qShift, newSqrt)
 		invOld := qDiv(1<<qShift, sqrtP)
 		out = (L * (invOld - invNew)) >> qShift
-		v3setU(v3KeySqrtP, newSqrt)
-		a0, a1 := getAssetsV3()
+		setU(KeySqrtP, newSqrt)
+		a0, a1 := getAssets()
 		sdk.HiveDraw(int64(amtIn), a1)
 		if out < minOut {
 			panic("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a0)
-		v3setU(v3KeyFeeAcc1, v3getU(v3KeyFeeAcc1)+fee)
+		setU(KeyFeeAcc1, getU(KeyFeeAcc1)+fee)
 	}
 	return nil
 }
 
-//go:wasmexport set_paused_v3
-func SetPausedV3(arg *string) *string {
+//go:wasmexport set_paused
+func SetPaused(arg *string) *string {
 	if !isSystemSender() {
 		panic("only system")
 	}
@@ -442,6 +424,6 @@ func SetPausedV3(arg *string) *string {
 	if v != 0 && v != 1 {
 		panic("bad pause")
 	}
-	v3setU(v3KeyPaused, v)
+	setU(KeyPaused, v)
 	return nil
 }

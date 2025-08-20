@@ -30,3 +30,7 @@ func hiveTransfer(arg1 *string, arg2 *string, arg3 *string) *string
 
 //go:wasmimport sdk hive.withdraw
 func hiveWithdraw(arg1 *string, arg2 *string, arg3 *string) *string
+
+
+
+
