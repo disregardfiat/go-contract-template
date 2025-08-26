@@ -37,7 +37,7 @@ func qMul(a, b uint64) uint64 {
 
 func qDiv(a, b uint64) uint64 {
 	if b == 0 {
-		panic("div by zero")
+		sdk.Abort("div by zero")
 	}
 	return (a << qShift) / b
 }
@@ -75,7 +75,7 @@ func Init(arg *string) *string {
 	// args: asset0,asset1,fee_bps,init_sqrt_q32,active_lower_q32,active_upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) < 6 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	setStr(KeyAsset0, p[0])
 	setStr(KeyAsset1, p[1])
@@ -86,7 +86,7 @@ func Init(arg *string) *string {
 	lower, _ := strconv.ParseUint(p[4], 10, 64)
 	upper, _ := strconv.ParseUint(p[5], 10, 64)
 	if !(lower < sqrtP && sqrtP < upper) {
-		panic("price not within active range")
+		sdk.Abort("price not within active range")
 	}
 	setU(KeyActiveLower, lower)
 	setU(KeyActiveUpper, upper)
@@ -105,8 +105,26 @@ func getAssets() (sdk.Asset, sdk.Asset) {
 
 func RequireNotPaused() {
 	if getU(KeyPaused) != 0 {
-		panic("paused")
+		sdk.Abort("paused")
 	}
+}
+
+// Get pool liquidity from contract balances instead of stored KeyLiquidity
+func getTotalLiquidityFromBalances() uint64 {
+	a0, a1 := getAssets()
+	env := sdk.GetEnv()
+	contractAddr := sdk.Address(env.ContractId)
+	b0 := sdk.GetBalance(contractAddr, a0)
+	b1 := sdk.GetBalance(contractAddr, a1)
+	if b0 < 0 || b1 < 0 {
+		sdk.Abort("negative contract balance")
+	}
+	sqrtP := getU(KeySqrtP)
+	lower := getU(KeyActiveLower)
+	upper := getU(KeyActiveUpper)
+	L0 := getLiquidityForAmount0(sqrtP, upper, uint64(b0))
+	L1 := getLiquidityForAmount1(lower, sqrtP, uint64(b1))
+	return minU64(L0, L1)
 }
 
 func updatePositionOwed(owner sdk.Address, lower, upper uint64) {
@@ -190,7 +208,7 @@ func Mint(arg *string) *string {
 	// args: lower_q32,upper_q32,amount0,amount1
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 4 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	lower, _ := strconv.ParseUint(p[0], 10, 64)
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
@@ -199,7 +217,7 @@ func Mint(arg *string) *string {
 
 	// enforce single active range for now
 	if lower != getU(KeyActiveLower) || upper != getU(KeyActiveUpper) {
-		panic("range must equal active range")
+		sdk.Abort("range must equal active range")
 	}
 
 	sqrtP := getU(KeySqrtP)
@@ -207,7 +225,7 @@ func Mint(arg *string) *string {
 	L1 := getLiquidityForAmount1(lower, sqrtP, amt1)
 	L := minU64(L0, L1)
 	if L == 0 {
-		panic("zero L")
+		sdk.Abort("zero L")
 	}
 
 	a0, a1 := getAssets()
@@ -225,7 +243,7 @@ func Mint(arg *string) *string {
 	setU(posKey(env.Sender.Address, lower, upper, "fg0_last"), getU(KeyFeeGrowth0))
 	setU(posKey(env.Sender.Address, lower, upper, "fg1_last"), getU(KeyFeeGrowth1))
 
-	setU(KeyLiquidity, getU(KeyLiquidity)+L)
+	// no stored total liquidity; derived from balances
 	return nil
 }
 
@@ -235,7 +253,7 @@ func Burn(arg *string) *string {
 	// args: lower_q32,upper_q32,liquidity
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 3 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	lower, _ := strconv.ParseUint(p[0], 10, 64)
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
@@ -245,7 +263,7 @@ func Burn(arg *string) *string {
 	updatePositionOwed(env.Sender.Address, lower, upper)
 	curL := getU(posKey(env.Sender.Address, lower, upper, "liquidity"))
 	if liq == 0 || liq > curL {
-		panic("bad liq")
+		sdk.Abort("bad liq")
 	}
 	// Accrue underlying owed for removed liquidity at current price
 	sqrtP := getU(KeySqrtP)
@@ -259,7 +277,7 @@ func Burn(arg *string) *string {
 		setU(posKey(env.Sender.Address, lower, upper, "owed1"), cur+owed1)
 	}
 	setU(posKey(env.Sender.Address, lower, upper, "liquidity"), curL-liq)
-	setU(KeyLiquidity, getU(KeyLiquidity)-liq)
+	// no stored total liquidity; derived from balances
 	return nil
 }
 
@@ -269,7 +287,7 @@ func Collect(arg *string) *string {
 	// args: lower_q32,upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	lower, _ := strconv.ParseUint(p[0], 10, 64)
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
@@ -299,11 +317,11 @@ func isSystemSender() bool {
 //go:wasmexport set_fee
 func SetFee(arg *string) *string {
 	if !isSystemSender() {
-		panic("only system")
+		sdk.Abort("only system")
 	}
 	v, _ := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
 	if v > 10_000 {
-		panic("bad bps")
+		sdk.Abort("bad bps")
 	}
 	setU(KeyFeeBps, v)
 	return nil
@@ -312,17 +330,17 @@ func SetFee(arg *string) *string {
 //go:wasmexport set_active_range
 func SetActiveRange(arg *string) *string {
 	if !isSystemSender() {
-		panic("only system")
+		sdk.Abort("only system")
 	}
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	lower, _ := strconv.ParseUint(p[0], 10, 64)
 	upper, _ := strconv.ParseUint(p[1], 10, 64)
 	sqrtP := getU(KeySqrtP)
 	if !(lower < sqrtP && sqrtP < upper) {
-		panic("price not within new range")
+		sdk.Abort("price not within new range")
 	}
 	setU(KeyActiveLower, lower)
 	setU(KeyActiveUpper, upper)
@@ -334,7 +352,7 @@ func Swap(arg *string) *string {
 	// args: dir,amountIn(,minOut)
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 && len(p) != 3 {
-		panic("invalid args")
+		sdk.Abort("invalid args")
 	}
 	dir := p[0]
 	amtIn, _ := strconv.ParseUint(p[1], 10, 64)
@@ -346,12 +364,12 @@ func Swap(arg *string) *string {
 	RequireNotPaused()
 	feeBps := getU(KeyFeeBps)
 	sqrtP := getU(KeySqrtP)
-	L := getU(KeyLiquidity)
+	L := getTotalLiquidityFromBalances()
 	if L == 0 {
-		panic("no liquidity")
+		sdk.Abort("no liquidity")
 	}
 	if sqrtP == 0 {
-		panic("bad price")
+		sdk.Abort("bad price")
 	}
 	lower := getU(KeyActiveLower)
 	upper := getU(KeyActiveUpper)
@@ -366,7 +384,7 @@ func Swap(arg *string) *string {
 		fg1 := getU(KeyFeeGrowth1) + ((fee << qShift) / L)
 		setU(KeyFeeGrowth1, fg1)
 	} else {
-		panic("dir")
+		sdk.Abort("dir")
 	}
 
 	var newSqrt uint64
@@ -388,7 +406,7 @@ func Swap(arg *string) *string {
 		sdk.HiveDraw(int64(amtIn), a0)
 		// send out
 		if out < minOut {
-			panic("slippage")
+			sdk.Abort("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a1)
 		setU(KeyFeeAcc0, getU(KeyFeeAcc0)+fee)
@@ -407,7 +425,7 @@ func Swap(arg *string) *string {
 		a0, a1 := getAssets()
 		sdk.HiveDraw(int64(amtIn), a1)
 		if out < minOut {
-			panic("slippage")
+			sdk.Abort("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a0)
 		setU(KeyFeeAcc1, getU(KeyFeeAcc1)+fee)
@@ -418,11 +436,11 @@ func Swap(arg *string) *string {
 //go:wasmexport set_paused
 func SetPaused(arg *string) *string {
 	if !isSystemSender() {
-		panic("only system")
+		sdk.Abort("only system")
 	}
 	v, _ := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
 	if v != 0 && v != 1 {
-		panic("bad pause")
+		sdk.Abort("bad pause")
 	}
 	setU(KeyPaused, v)
 	return nil

@@ -7,6 +7,9 @@ package sdk
 //go:wasmimport sdk console.log
 func log(s *string) *string
 
+//go:wasmimport sdk abort
+func abort(s *string) *string
+
 //go:wasmimport sdk db.setObject
 func stateSetObject(key *string, value *string) *string
 
@@ -30,7 +33,3 @@ func hiveTransfer(arg1 *string, arg2 *string, arg3 *string) *string
 
 //go:wasmimport sdk hive.withdraw
 func hiveWithdraw(arg1 *string, arg2 *string, arg3 *string) *string
-
-
-
-

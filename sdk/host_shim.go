@@ -31,6 +31,10 @@ var (
 // wasmimport-compatible function signatures
 func log(s *string) *string { return nil }
 
+func abort(msg *string) *string {
+	panic(*msg)
+}
+
 func stateSetObject(key *string, value *string) *string {
 	shimMu.Lock()
 	defer shimMu.Unlock()
@@ -155,7 +159,3 @@ func incBal(addr, asset string, amt int64) {
 	shimBalances[addr][asset] += amt
 }
 func decBal(addr, asset string, amt int64) { incBal(addr, asset, -amt) }
-
-
-
-

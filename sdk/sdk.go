@@ -9,6 +9,11 @@ func Log(s string) {
 	log(&s)
 }
 
+// Abort execution with an error message so callers can receive the reason.
+func Abort(msg string) {
+	abort(&msg)
+}
+
 // var envMap = []string{
 // 	"contract.id",
 // 	"tx.origin",
