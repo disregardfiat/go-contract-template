@@ -2,7 +2,7 @@ package main
 
 import (
 	"contract-template/sdk"
-	"math/bits"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -19,27 +19,34 @@ const (
 	KeyActiveUpper = "active_upper_q32"
 	KeyFeeGrowth0  = "fee_growth0_q32"
 	KeyFeeGrowth1  = "fee_growth1_q32"
-	KeyFeeAcc0     = "fee_acc0"
-	KeyFeeAcc1     = "fee_acc1"
-	KeyPaused      = "paused"
 )
 
 const qShift = 32
 
 func qMul(a, b uint64) uint64 {
-	// (a*b)>>qShift using 128-bit multiply
-	hi, lo := bits.Mul64(a, b)
-	if qShift == 0 {
-		return lo
+	var prod big.Int
+	prod.SetUint64(a)
+	prod.Mul(&prod, new(big.Int).SetUint64(b))
+	prod.Rsh(&prod, uint(qShift))
+	if prod.Sign() < 0 || prod.BitLen() > 64 {
+		sdk.Abort("qMul overflow")
 	}
-	return (hi << qShift) | (lo >> qShift)
+	return prod.Uint64()
 }
 
 func qDiv(a, b uint64) uint64 {
 	if b == 0 {
 		sdk.Abort("div by zero")
 	}
-	return (a << qShift) / b
+	var num big.Int
+	num.SetUint64(a)
+	num.Lsh(&num, uint(qShift))
+	den := new(big.Int).SetUint64(b)
+	quo := new(big.Int).Quo(&num, den)
+	if quo.Sign() < 0 || quo.BitLen() > 64 {
+		sdk.Abort("qDiv overflow")
+	}
+	return quo.Uint64()
 }
 
 func minU64(a, b uint64) uint64 {
@@ -62,7 +69,10 @@ func getU(key string) uint64 {
 	if s == "" {
 		return 0
 	}
-	n, _ := strconv.ParseUint(s, 10, 64)
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 	return n
 }
 func setU(key string, v uint64) { sdk.StateSetObject(key, strconv.FormatUint(v, 10)) }
@@ -79,23 +89,32 @@ func Init(arg *string) *string {
 	}
 	setStr(KeyAsset0, p[0])
 	setStr(KeyAsset1, p[1])
-	feeBps, _ := strconv.ParseUint(p[2], 10, 64)
+	feeBps, err := strconv.ParseUint(p[2], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 	setU(KeyFeeBps, feeBps)
-	sqrtP, _ := strconv.ParseUint(p[3], 10, 64)
+	sqrtP, err := strconv.ParseUint(p[3], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 	setU(KeySqrtP, sqrtP)
-	lower, _ := strconv.ParseUint(p[4], 10, 64)
-	upper, _ := strconv.ParseUint(p[5], 10, 64)
-	if !(lower < sqrtP && sqrtP < upper) {
-		sdk.Abort("price not within active range")
+	lower, err := strconv.ParseUint(p[4], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	upper, err := strconv.ParseUint(p[5], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	if lower >= upper || !(lower < sqrtP && sqrtP < upper) {
+		sdk.Abort("invalid range or price")
 	}
 	setU(KeyActiveLower, lower)
 	setU(KeyActiveUpper, upper)
 	setU(KeyLiquidity, 0)
 	setU(KeyFeeGrowth0, 0)
 	setU(KeyFeeGrowth1, 0)
-	setU(KeyFeeAcc0, 0)
-	setU(KeyFeeAcc1, 0)
-	setU(KeyPaused, 0)
 	return nil
 }
 
@@ -103,29 +122,7 @@ func getAssets() (sdk.Asset, sdk.Asset) {
 	return sdk.Asset(getStr(KeyAsset0)), sdk.Asset(getStr(KeyAsset1))
 }
 
-func RequireNotPaused() {
-	if getU(KeyPaused) != 0 {
-		sdk.Abort("paused")
-	}
-}
-
-// Get pool liquidity from contract balances instead of stored KeyLiquidity
-func getTotalLiquidityFromBalances() uint64 {
-	a0, a1 := getAssets()
-	env := sdk.GetEnv()
-	contractAddr := sdk.Address(env.ContractId)
-	b0 := sdk.GetBalance(contractAddr, a0)
-	b1 := sdk.GetBalance(contractAddr, a1)
-	if b0 < 0 || b1 < 0 {
-		sdk.Abort("negative contract balance")
-	}
-	sqrtP := getU(KeySqrtP)
-	lower := getU(KeyActiveLower)
-	upper := getU(KeyActiveUpper)
-	L0 := getLiquidityForAmount0(sqrtP, upper, uint64(b0))
-	L1 := getLiquidityForAmount1(lower, sqrtP, uint64(b1))
-	return minU64(L0, L1)
-}
+//func RequireNotPaused() {}
 
 func updatePositionOwed(owner sdk.Address, lower, upper uint64) {
 	L := getU(posKey(owner, lower, upper, "liquidity"))
@@ -138,15 +135,29 @@ func updatePositionOwed(owner sdk.Address, lower, upper uint64) {
 	last1 := getU(posKey(owner, lower, upper, "fg1_last"))
 	if fg0 > last0 {
 		delta := fg0 - last0
+		var owedBi big.Int
+		owedBi.SetUint64(delta)
+		owedBi.Mul(&owedBi, new(big.Int).SetUint64(L))
+		owedBi.Rsh(&owedBi, uint(qShift))
+		if owedBi.BitLen() > 64 {
+			sdk.Abort("owed overflow")
+		}
 		owed := getU(posKey(owner, lower, upper, "owed0"))
-		owed += (delta * L) >> qShift
+		owed += owedBi.Uint64()
 		setU(posKey(owner, lower, upper, "owed0"), owed)
 		setU(posKey(owner, lower, upper, "fg0_last"), fg0)
 	}
 	if fg1 > last1 {
 		delta := fg1 - last1
+		var owedBi big.Int
+		owedBi.SetUint64(delta)
+		owedBi.Mul(&owedBi, new(big.Int).SetUint64(L))
+		owedBi.Rsh(&owedBi, uint(qShift))
+		if owedBi.BitLen() > 64 {
+			sdk.Abort("owed overflow")
+		}
 		owed := getU(posKey(owner, lower, upper, "owed1"))
-		owed += (delta * L) >> qShift
+		owed += owedBi.Uint64()
 		setU(posKey(owner, lower, upper, "owed1"), owed)
 		setU(posKey(owner, lower, upper, "fg1_last"), fg1)
 	}
@@ -159,7 +170,10 @@ func getLiquidityForAmount0(sqrtA, sqrtB, amount0 uint64) uint64 {
 	}
 	num := qMul(qMul(amount0<<qShift, sqrtA), sqrtB) // safe Q math
 	den := (sqrtB - sqrtA)
-	return num / den >> qShift
+	if den == 0 {
+		sdk.Abort("den zero")
+	}
+	return num / den
 }
 
 func getLiquidityForAmount1(sqrtA, sqrtB, amount1 uint64) uint64 {
@@ -167,6 +181,9 @@ func getLiquidityForAmount1(sqrtA, sqrtB, amount1 uint64) uint64 {
 		sqrtA, sqrtB = sqrtB, sqrtA
 	}
 	den := (sqrtB - sqrtA)
+	if den == 0 {
+		sdk.Abort("den zero")
+	}
 	return (amount1 << qShift) / den
 }
 
@@ -204,16 +221,28 @@ func amountOwedFromLiquidity(liq, sqrtA, sqrtB, sqrtP uint64) (amt0, amt1 uint64
 
 //go:wasmexport mint
 func Mint(arg *string) *string {
-	RequireNotPaused()
-	// args: lower_q32,upper_q32,amount0,amount1
+	//RequireNotPaused()
+	// args: lower_q32,upper_q32,max_amount0,max_amount1
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 4 {
 		sdk.Abort("invalid args")
 	}
-	lower, _ := strconv.ParseUint(p[0], 10, 64)
-	upper, _ := strconv.ParseUint(p[1], 10, 64)
-	amt0, _ := strconv.ParseUint(p[2], 10, 64)
-	amt1, _ := strconv.ParseUint(p[3], 10, 64)
+	lower, err := strconv.ParseUint(p[0], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	upper, err := strconv.ParseUint(p[1], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	maxAmt0, err := strconv.ParseUint(p[2], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	maxAmt1, err := strconv.ParseUint(p[3], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 
 	// enforce single active range for now
 	if lower != getU(KeyActiveLower) || upper != getU(KeyActiveUpper) {
@@ -221,19 +250,24 @@ func Mint(arg *string) *string {
 	}
 
 	sqrtP := getU(KeySqrtP)
-	L0 := getLiquidityForAmount0(sqrtP, upper, amt0)
-	L1 := getLiquidityForAmount1(lower, sqrtP, amt1)
+	L0 := getLiquidityForAmount0(sqrtP, upper, maxAmt0)
+	L1 := getLiquidityForAmount1(lower, sqrtP, maxAmt1)
 	L := minU64(L0, L1)
 	if L == 0 {
 		sdk.Abort("zero L")
 	}
 
-	a0, a1 := getAssets()
-	if amt0 > 0 {
-		sdk.HiveDraw(int64(amt0), a0)
+	req0, req1 := amountOwedFromLiquidity(L, lower, upper, sqrtP)
+	if req0 > maxAmt0 || req1 > maxAmt1 {
+		sdk.Abort("slippage")
 	}
-	if amt1 > 0 {
-		sdk.HiveDraw(int64(amt1), a1)
+
+	a0, a1 := getAssets()
+	if req0 > 0 {
+		sdk.HiveDraw(int64(req0), a0)
+	}
+	if req1 > 0 {
+		sdk.HiveDraw(int64(req1), a1)
 	}
 
 	env := sdk.GetEnv()
@@ -243,21 +277,31 @@ func Mint(arg *string) *string {
 	setU(posKey(env.Sender.Address, lower, upper, "fg0_last"), getU(KeyFeeGrowth0))
 	setU(posKey(env.Sender.Address, lower, upper, "fg1_last"), getU(KeyFeeGrowth1))
 
-	// no stored total liquidity; derived from balances
+	totalL := getU(KeyLiquidity)
+	setU(KeyLiquidity, totalL+L)
 	return nil
 }
 
 //go:wasmexport burn
 func Burn(arg *string) *string {
-	RequireNotPaused()
+	//RequireNotPaused()
 	// args: lower_q32,upper_q32,liquidity
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 3 {
 		sdk.Abort("invalid args")
 	}
-	lower, _ := strconv.ParseUint(p[0], 10, 64)
-	upper, _ := strconv.ParseUint(p[1], 10, 64)
-	liq, _ := strconv.ParseUint(p[2], 10, 64)
+	lower, err := strconv.ParseUint(p[0], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	upper, err := strconv.ParseUint(p[1], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	liq, err := strconv.ParseUint(p[2], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 
 	env := sdk.GetEnv()
 	updatePositionOwed(env.Sender.Address, lower, upper)
@@ -277,20 +321,30 @@ func Burn(arg *string) *string {
 		setU(posKey(env.Sender.Address, lower, upper, "owed1"), cur+owed1)
 	}
 	setU(posKey(env.Sender.Address, lower, upper, "liquidity"), curL-liq)
-	// no stored total liquidity; derived from balances
+	totalL := getU(KeyLiquidity)
+	if totalL < liq {
+		sdk.Abort("total L underflow")
+	}
+	setU(KeyLiquidity, totalL-liq)
 	return nil
 }
 
 //go:wasmexport collect
 func Collect(arg *string) *string {
-	RequireNotPaused()
+	//RequireNotPaused()
 	// args: lower_q32,upper_q32
 	p := strings.Split(strings.TrimSpace(*arg), ",")
 	if len(p) != 2 {
 		sdk.Abort("invalid args")
 	}
-	lower, _ := strconv.ParseUint(p[0], 10, 64)
-	upper, _ := strconv.ParseUint(p[1], 10, 64)
+	lower, err := strconv.ParseUint(p[0], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	upper, err := strconv.ParseUint(p[1], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 	env := sdk.GetEnv()
 	updatePositionOwed(env.Sender.Address, lower, upper)
 	owed0 := getU(posKey(env.Sender.Address, lower, upper, "owed0"))
@@ -319,8 +373,8 @@ func SetFee(arg *string) *string {
 	if !isSystemSender() {
 		sdk.Abort("only system")
 	}
-	v, _ := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
-	if v > 10_000 {
+	v, err := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
+	if err != nil || v > 10_000 {
 		sdk.Abort("bad bps")
 	}
 	setU(KeyFeeBps, v)
@@ -336,8 +390,17 @@ func SetActiveRange(arg *string) *string {
 	if len(p) != 2 {
 		sdk.Abort("invalid args")
 	}
-	lower, _ := strconv.ParseUint(p[0], 10, 64)
-	upper, _ := strconv.ParseUint(p[1], 10, 64)
+	lower, err := strconv.ParseUint(p[0], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	upper, err := strconv.ParseUint(p[1], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
+	if lower >= upper {
+		sdk.Abort("invalid range")
+	}
 	sqrtP := getU(KeySqrtP)
 	if !(lower < sqrtP && sqrtP < upper) {
 		sdk.Abort("price not within new range")
@@ -355,16 +418,22 @@ func Swap(arg *string) *string {
 		sdk.Abort("invalid args")
 	}
 	dir := p[0]
-	amtIn, _ := strconv.ParseUint(p[1], 10, 64)
+	amtIn, err := strconv.ParseUint(p[1], 10, 64)
+	if err != nil {
+		sdk.Abort("parse error")
+	}
 	minOut := uint64(0)
 	if len(p) == 3 && p[2] != "" {
-		m, _ := strconv.ParseUint(p[2], 10, 64)
+		m, err := strconv.ParseUint(p[2], 10, 64)
+		if err != nil {
+			sdk.Abort("parse error")
+		}
 		minOut = m
 	}
-	RequireNotPaused()
+	//RequireNotPaused()
 	feeBps := getU(KeyFeeBps)
 	sqrtP := getU(KeySqrtP)
-	L := getTotalLiquidityFromBalances()
+	L := getU(KeyLiquidity)
 	if L == 0 {
 		sdk.Abort("no liquidity")
 	}
@@ -375,13 +444,32 @@ func Swap(arg *string) *string {
 	upper := getU(KeyActiveUpper)
 
 	fee := amtIn * feeBps / 10_000
+	if fee >= amtIn {
+		sdk.Abort("fee >= in")
+	}
 	eff := amtIn - fee
 	// distribute fee via fee growth per liquidity
 	if dir == "0to1" {
-		fg0 := getU(KeyFeeGrowth0) + ((fee << qShift) / L)
+		fg0 := getU(KeyFeeGrowth0)
+		var feeBi big.Int
+		feeBi.SetUint64(fee)
+		feeBi.Lsh(&feeBi, uint(qShift))
+		feeBi.Div(&feeBi, new(big.Int).SetUint64(L))
+		if feeBi.BitLen() > 64 {
+			sdk.Abort("fg overflow")
+		}
+		fg0 += feeBi.Uint64()
 		setU(KeyFeeGrowth0, fg0)
 	} else if dir == "1to0" {
-		fg1 := getU(KeyFeeGrowth1) + ((fee << qShift) / L)
+		fg1 := getU(KeyFeeGrowth1)
+		var feeBi big.Int
+		feeBi.SetUint64(fee)
+		feeBi.Lsh(&feeBi, uint(qShift))
+		feeBi.Div(&feeBi, new(big.Int).SetUint64(L))
+		if feeBi.BitLen() > 64 {
+			sdk.Abort("fg overflow")
+		}
+		fg1 += feeBi.Uint64()
 		setU(KeyFeeGrowth1, fg1)
 	} else {
 		sdk.Abort("dir")
@@ -392,14 +480,28 @@ func Swap(arg *string) *string {
 	if dir == "0to1" {
 		// sqrt' = 1 / (1/sqrt + dx/L)
 		inv := qDiv(1<<qShift, sqrtP)
-		invPlus := inv + qDiv(eff<<qShift, L)
+		var addBi big.Int
+		addBi.SetUint64(eff)
+		addBi.Lsh(&addBi, uint(qShift))
+		addBi.Div(&addBi, new(big.Int).SetUint64(L))
+		if addBi.BitLen() > 64 {
+			sdk.Abort("add overflow")
+		}
+		invPlus := inv + addBi.Uint64()
 		newSqrt = qDiv(1<<qShift, invPlus)
 		if newSqrt < lower {
 			newSqrt = lower
 		}
 		// dy = L * (sqrt - sqrt')
 		diff := sqrtP - newSqrt
-		out = (L * diff) >> qShift
+		var outBi big.Int
+		outBi.SetUint64(L)
+		outBi.Mul(&outBi, new(big.Int).SetUint64(diff))
+		outBi.Rsh(&outBi, uint(qShift))
+		if outBi.BitLen() > 64 {
+			sdk.Abort("out overflow")
+		}
+		out = outBi.Uint64()
 		setU(KeySqrtP, newSqrt)
 		a0, a1 := getAssets()
 		// draw in
@@ -409,18 +511,32 @@ func Swap(arg *string) *string {
 			sdk.Abort("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a1)
-		setU(KeyFeeAcc0, getU(KeyFeeAcc0)+fee)
 	} else {
 		// sqrt' = sqrt + dy/L
-		inc := qDiv(eff<<qShift, L)
+		var incBi big.Int
+		incBi.SetUint64(eff)
+		incBi.Lsh(&incBi, uint(qShift))
+		incBi.Div(&incBi, new(big.Int).SetUint64(L))
+		if incBi.BitLen() > 64 {
+			sdk.Abort("inc overflow")
+		}
+		inc := incBi.Uint64()
 		newSqrt = sqrtP + inc
-		if newSqrt > upper {
+		if newSqrt > upper || newSqrt < sqrtP { // overflow check
 			newSqrt = upper
 		}
 		// dx = L * (1/sqrt' - 1/sqrt)
 		invNew := qDiv(1<<qShift, newSqrt)
 		invOld := qDiv(1<<qShift, sqrtP)
-		out = (L * (invOld - invNew)) >> qShift
+		diff := invOld - invNew
+		var outBi big.Int
+		outBi.SetUint64(L)
+		outBi.Mul(&outBi, new(big.Int).SetUint64(diff))
+		outBi.Rsh(&outBi, uint(qShift))
+		if outBi.BitLen() > 64 {
+			sdk.Abort("out overflow")
+		}
+		out = outBi.Uint64()
 		setU(KeySqrtP, newSqrt)
 		a0, a1 := getAssets()
 		sdk.HiveDraw(int64(amtIn), a1)
@@ -428,20 +544,113 @@ func Swap(arg *string) *string {
 			sdk.Abort("slippage")
 		}
 		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(out), a0)
-		setU(KeyFeeAcc1, getU(KeyFeeAcc1)+fee)
 	}
 	return nil
 }
 
-//go:wasmexport set_paused
-func SetPaused(arg *string) *string {
-	if !isSystemSender() {
-		sdk.Abort("only system")
+// pause feature removed
+
+// Number formatting utilities (supports up to 256-bit unsigned)
+type numFormat struct {
+	base         int
+	hasHexPrefix bool
+	digitCount   int
+	leadingZeros int
+}
+
+func parseNumberWithFormat(s string) (*big.Int, numFormat, bool) {
+	orig := strings.TrimSpace(s)
+	if orig == "" {
+		return nil, numFormat{}, false
 	}
-	v, _ := strconv.ParseUint(strings.TrimSpace(*arg), 10, 64)
-	if v != 0 && v != 1 {
-		sdk.Abort("bad pause")
+	fmt := numFormat{}
+	var numStr string
+	// Hex detection with optional 0x/0X prefix
+	if len(orig) > 2 && (orig[0:2] == "0x" || orig[0:2] == "0X") {
+		fmt.base = 16
+		fmt.hasHexPrefix = true
+		numStr = orig[2:]
+	} else {
+		// If contains only hex digits and letters a-f/A-F with any 'x' not at start? We default to decimal unless prefixed
+		fmt.base = 10
+		numStr = orig
 	}
-	setU(KeyPaused, v)
-	return nil
+	// Track formatting characteristics
+	// Count leading zeros in the numeric part
+	leading := 0
+	for leading < len(numStr) && numStr[leading] == '0' {
+		leading++
+	}
+	fmt.leadingZeros = leading
+	fmt.digitCount = len(numStr)
+	// Parse
+	bi := new(big.Int)
+	if fmt.base == 16 {
+		// Empty hex means zero
+		if numStr == "" {
+			return new(big.Int), fmt, true
+		}
+		_, ok := bi.SetString(numStr, 16)
+		if !ok {
+			return nil, numFormat{}, false
+		}
+	} else {
+		_, ok := bi.SetString(numStr, 10)
+		if !ok {
+			return nil, numFormat{}, false
+		}
+	}
+	// Only unsigned supported
+	if bi.Sign() < 0 {
+		return nil, numFormat{}, false
+	}
+	return bi, fmt, true
+}
+
+func formatNumberWithFormat(bi *big.Int, fmt numFormat) string {
+	if fmt.base == 16 {
+		d := bi.Text(16)
+		// lower-case hex; left-pad to preserve original digit count
+		if len(d) < fmt.digitCount {
+			pad := make([]byte, fmt.digitCount-len(d))
+			for i := range pad {
+				pad[i] = '0'
+			}
+			d = string(pad) + d
+		}
+		if fmt.hasHexPrefix {
+			return "0x" + d
+		}
+		return d
+	}
+	// Decimal: preserve total digit count (including leading zeros)
+	d := bi.Text(10)
+	if len(d) < fmt.digitCount {
+		pad := make([]byte, fmt.digitCount-len(d))
+		for i := range pad {
+			pad[i] = '0'
+		}
+		d = string(pad) + d
+	}
+	return d
+}
+
+//go:wasmexport format_number
+func FormatNumber(arg *string) *string {
+	// Accept a single number (decimal or 0x-hex). Validate it fits in 256 bits.
+	// Return it formatted in the same base and width as received (preserving 0x and leading zeros).
+	if arg == nil {
+		msg := "nil arg"
+		sdk.Abort(msg)
+	}
+	in := strings.TrimSpace(*arg)
+	bi, fmt, ok := parseNumberWithFormat(in)
+	if !ok {
+		sdk.Abort("bad number")
+	}
+	if bi.BitLen() > 256 {
+		sdk.Abort("number > 256 bits")
+	}
+	out := formatNumberWithFormat(bi, fmt)
+	return &out
 }
