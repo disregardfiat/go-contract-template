@@ -27,6 +27,9 @@ func Init(payload *string) *string {
 		base = parseUintStrict(parts[2])
 	}
 	setUint(keyBaseFeeBps, base)
+	// default slip fee params
+	setUint(keySlipBaselineBps, defaultSlipBaselineBps)
+	setUint(keySlipShareBps, defaultSlipShareBps)
 	setUint(keyTotalLP, 0)
 	setInt(keyReserve0, 0)
 	setInt(keyReserve1, 0)
@@ -34,8 +37,6 @@ func Init(payload *string) *string {
 	setInt(keyFee1, 0)
 	setUint(keyFeeClaimIntervalS, defaultFeeClaimIntervalS)
 	setStr(keyFeeLastClaimUnix, sdk.GetEnv().Timestamp)
-	setUint(keyPaused, 0)
-	setUint(keyReentrancy, 0)
 
 	return nil
 }
@@ -45,9 +46,6 @@ func Init(payload *string) *string {
 //
 //go:wasmexport add_liquidity
 func AddLiquidity(payload *string) *string {
-	requireNotPaused()
-	enterReentrancy()
-	defer exitReentrancy()
 	params := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(params) == 2)
 	amt0U := parseUintStrict(params[0])
@@ -56,10 +54,10 @@ func AddLiquidity(payload *string) *string {
 	asset0, asset1 := getAssets()
 	// Pull funds from user intents into contract
 	if amt0U > 0 {
-		sdk.HiveDraw(int64(amt0U), asset0)
+		drawAsset(int64(amt0U), asset0)
 	}
 	if amt1U > 0 {
-		sdk.HiveDraw(int64(amt1U), asset1)
+		drawAsset(int64(amt1U), asset1)
 	}
 
 	// Update reserves and mint LP
@@ -98,9 +96,6 @@ func AddLiquidity(payload *string) *string {
 //
 //go:wasmexport remove_liquidity
 func RemoveLiquidity(payload *string) *string {
-	requireNotPaused()
-	enterReentrancy()
-	defer exitReentrancy()
 	lpToBurnU, _ := strconv.ParseUint(strings.TrimSpace(*payload), 10, 64)
 	env := sdk.GetEnv()
 	userLP := getLP(env.Sender.Address)
@@ -122,10 +117,10 @@ func RemoveLiquidity(payload *string) *string {
 	// transfer out
 	asset0, asset1 := getAssets()
 	if amt0 > 0 {
-		sdk.HiveTransfer(env.Sender.Address, amt0, asset0)
+		transferAsset(env.Sender.Address, amt0, asset0)
 	}
 	if amt1 > 0 {
-		sdk.HiveTransfer(env.Sender.Address, amt1, asset1)
+		transferAsset(env.Sender.Address, amt1, asset1)
 	}
 	return nil
 }
@@ -136,9 +131,6 @@ func RemoveLiquidity(payload *string) *string {
 //
 //go:wasmexport swap
 func Swap(payload *string) *string {
-	requireNotPaused()
-	enterReentrancy()
-	defer exitReentrancy()
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(parts) == 2 || len(parts) == 3)
 	dir := parts[0]
@@ -149,8 +141,9 @@ func Swap(payload *string) *string {
 	}
 	assert(amountInU > 0)
 
-	feeBps := getUint(keyBaseFeeBps) // 0.08% irrespective of CLP dynamic
-	feeNumer := (10_000 - feeBps)
+	feeBps := getUint(keyBaseFeeBps) // base fee
+	baselineSlipBps := getUint(keySlipBaselineBps)
+	shareSlipBps := getUint(keySlipShareBps)
 
 	r0 := uint64(getInt(keyReserve0))
 	r1 := uint64(getInt(keyReserve1))
@@ -158,14 +151,18 @@ func Swap(payload *string) *string {
 	asset0, asset1 := getAssets()
 
 	if dir == "0to1" {
-		// draw asset0
-		sdk.HiveDraw(int64(amountInU), asset0)
-		// apply fee on input
-		dxEff := amountInU * feeNumer / 10_000
-		//can be 0
+		// input is asset0
+		drawAsset(int64(amountInU), asset0)
+
+		// base fee applies only if input is HBD
+		dxEff := amountInU
+		if isHbd(asset0) && feeBps > 0 {
+			dxEff = amountInU * (10_000 - feeBps) / 10_000
+		}
 		if dxEff <= 0 {
 			dxEff = 1
 		}
+
 		// constant product x*y=k, output dy = r1 - k/(r0+dxEff)
 		k := r0 * r1
 		newX := r0 + dxEff
@@ -173,34 +170,80 @@ func Swap(payload *string) *string {
 		assert(k > 0)
 		dy := r1 - (k / newX)
 		assert(dy > 0 && dy < r1)
-		assert(uint64(dy) >= minOutU)
+
+		// slippage-adjusted extra fee to LPs (reduce user output and keep in reserves)
+		dyUser := uint64(dy)
+		if shareSlipBps > 0 {
+			dyNominal := (r1 * dxEff) / r0
+			if dyNominal > 0 {
+				slipBps := (dyNominal - uint64(dy)) * 10_000 / dyNominal
+				if slipBps > baselineSlipBps {
+					excess := slipBps - baselineSlipBps
+					// outExtra = dy * excessBps * shareBps / 1e8
+					outExtra := uint64(dy) * excess * shareSlipBps / 10_000 / 10_000
+					if outExtra >= dyUser {
+						outExtra = dyUser - 1
+					}
+					dyUser -= outExtra
+				}
+			}
+		}
+
+		assert(dyUser >= minOutU)
 
 		// update reserves: only effective input increases reserve
 		setInt(keyReserve0, int64(r0+dxEff))
-		setInt(keyReserve1, int64(r1-uint64(dy)))
-		// accrue fee (kept separate from reserves)
-		fee := int64(amountInU - dxEff)
-		setInt(keyFee0, getInt(keyFee0)+fee)
-		//CLP fees somewhere in here
-		// send out asset1
-		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(dy), asset1)
+		setInt(keyReserve1, int64(r1-dyUser))
+
+		// accrue base fee to HBD-side fee bucket only
+		if isHbd(asset0) {
+			fee := int64(amountInU - dxEff)
+			if fee > 0 {
+				setInt(keyFee0, getInt(keyFee0)+fee)
+			}
+		}
+
+		// send out asset1 to user
+		transferAsset(sdk.GetEnv().Sender.Address, int64(dyUser), asset1)
 	} else if dir == "1to0" {
-		sdk.HiveDraw(int64(amountInU), asset1)
-		dxEff := amountInU * feeNumer / 10_000
+		// input is asset1 (volatile side)
+		drawAsset(int64(amountInU), asset1)
+
+		// base fee applies only if input is HBD (it is not), so no base fee
+		dxEff := amountInU
 		k := r0 * r1
 		newY := r1 + dxEff
 		assert(newY > 0)
 		assert(k > 0)
 		dxOut := r0 - (k / newY)
 		assert(dxOut > 0 && dxOut < r0)
-		assert(uint64(dxOut) >= minOutU)
+
+		// slippage-adjusted extra fee to LPs (reduce user output and keep in reserves)
+		dxUser := uint64(dxOut)
+		if shareSlipBps > 0 {
+			dxNominal := (r0 * dxEff) / r1
+			if dxNominal > 0 {
+				slipBps := (dxNominal - uint64(dxOut)) * 10_000 / dxNominal
+				if slipBps > baselineSlipBps {
+					excess := slipBps - baselineSlipBps
+					outExtra := uint64(dxOut) * excess * shareSlipBps / 10_000 / 10_000
+					if outExtra >= dxUser {
+						outExtra = dxUser - 1
+					}
+					dxUser -= outExtra
+				}
+			}
+		}
+
+		assert(dxUser >= minOutU)
 
 		// only effective input increases reserve
 		setInt(keyReserve1, int64(r1+dxEff))
-		setInt(keyReserve0, int64(r0-uint64(dxOut)))
-		fee := int64(amountInU - dxEff)
-		setInt(keyFee1, getInt(keyFee1)+fee)
-		sdk.HiveTransfer(sdk.GetEnv().Sender.Address, int64(dxOut), asset0)
+		setInt(keyReserve0, int64(r0-dxUser))
+
+		// no non-HBD fee accrual here
+
+		transferAsset(sdk.GetEnv().Sender.Address, int64(dxUser), asset0)
 	} else {
 		assert(false)
 	}
@@ -212,20 +255,17 @@ func Swap(payload *string) *string {
 //
 //go:wasmexport donate
 func Donate(payload *string) *string {
-	requireNotPaused()
-	enterReentrancy()
-	defer exitReentrancy()
 	params := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(params) == 2)
 	amt0U, _ := strconv.ParseUint(params[0], 10, 64)
 	amt1U, _ := strconv.ParseUint(params[1], 10, 64)
 	a0, a1 := getAssets()
 	if amt0U > 0 {
-		sdk.HiveDraw(int64(amt0U), a0)
+		drawAsset(int64(amt0U), a0)
 		setInt(keyReserve0, getInt(keyReserve0)+int64(amt0U))
 	}
 	if amt1U > 0 {
-		sdk.HiveDraw(int64(amt1U), a1)
+		drawAsset(int64(amt1U), a1)
 		setInt(keyReserve1, getInt(keyReserve1)+int64(amt1U))
 	}
 	return nil
@@ -236,17 +276,17 @@ func Donate(payload *string) *string {
 //go:wasmexport claim_fees
 func ClaimFees(_ *string) *string {
 	assert(isSystemSender())
-	systemFR := sdk.Address("hive:vsc.dao")
+	dao := sdk.Address("hive:vsc.dao")
 	a0, a1 := getAssets()
 	f0 := getInt(keyFee0)
 	f1 := getInt(keyFee1)
 	if f0 > 0 && a0 == sdk.AssetHbd {
 		setInt(keyFee0, 0)
-		sdk.HiveTransfer(systemFR, f0, a0)
+		sdk.HiveWithdraw(dao, f0, a0)
 	}
 	if f1 > 0 && a1 == sdk.AssetHbd {
 		setInt(keyFee1, 0)
-		sdk.HiveTransfer(systemFR, f1, a1)
+		sdk.HiveWithdraw(dao, f1, a1)
 	}
 	// Note: non-HBD conversion to HBD requires router; omitted here.
 	setStr(keyFeeLastClaimUnix, sdk.GetEnv().Timestamp) // This might be a txid instead
@@ -258,7 +298,6 @@ func ClaimFees(_ *string) *string {
 //
 //go:wasmexport burn
 func Burn(payload *string) *string {
-	requireNotPaused()
 	amt, _ := strconv.ParseUint(strings.TrimSpace(*payload), 10, 64)
 	env := sdk.GetEnv()
 	bal := getLP(env.Sender.Address)
@@ -274,7 +313,6 @@ func Burn(payload *string) *string {
 //
 //go:wasmexport transfer
 func Transfer(payload *string) *string {
-	requireNotPaused()
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
 	assert(len(parts) == 2)
 	to := sdk.Address(parts[0])
@@ -293,9 +331,6 @@ func Transfer(payload *string) *string {
 //go:wasmexport si_withdraw
 func SIWithdraw(payload *string) *string {
 	assert(isSystemSender())
-	requireNotPaused()
-	enterReentrancy()
-	defer exitReentrancy()
 	// burn from all LP proportionally is complex; here we burn from caller-specified LP (system must specify address and amount)
 	// For simplicity, we accept "address,lpAmount" here.
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
@@ -321,10 +356,10 @@ func SIWithdraw(payload *string) *string {
 
 	// return to provider
 	if out0 > 0 {
-		sdk.HiveTransfer(addr, out0, a0)
+		transferAsset(addr, out0, a0)
 	}
 	if out1 > 0 {
-		sdk.HiveTransfer(addr, out1, a1)
+		transferAsset(addr, out1, a1)
 	}
 	return nil
 }
@@ -341,14 +376,18 @@ func SetBaseFee(payload *string) *string {
 	return nil
 }
 
-// System function: pause/unpause
-// Payload: "0|1"
+// System function: set slip fee parameters (bps). Consensus-only.
+// Payload: "baselineBps,shareBps"
 //
-//go:wasmexport set_paused
-func SetPaused(payload *string) *string {
+//go:wasmexport set_slip_params
+func SetSlipParams(payload *string) *string {
 	assert(isSystemSender())
-	v := parseUintStrict(strings.TrimSpace(*payload))
-	assert(v == 0 || v == 1)
-	setUint(keyPaused, v)
+	parts := strings.Split(strings.TrimSpace(*payload), ",")
+	assert(len(parts) == 2)
+	baseline := parseUintStrict(parts[0])
+	share := parseUintStrict(parts[1])
+	assert(baseline <= 10_000 && share <= 10_000)
+	setUint(keySlipBaselineBps, baseline)
+	setUint(keySlipShareBps, share)
 	return nil
 }
