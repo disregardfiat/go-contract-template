@@ -12,9 +12,13 @@ This example implements a constant-product AMM where every pool is anchored to H
 - **Swaps**: `swap dir,amountIn[,minOut]` with `dir` in `{0to1,1to0}`.
   - Applies a base fee only when the input side is HBD.
   - Adds an optional slip-adjusted fee (portion of slippage above a baseline) kept in reserves for LPs.
+  - Optional referral/beneficiary: either `swap dir,amountIn,beneficiary,refBps` or `swap dir,amountIn,minOut,beneficiary,refBps`.
+    - **refBps**: 1–1000 (0.01%–10.00%).
+    - For `0to1` (HBD input): referral is paid in HBD from the base fee, not affecting user output.
+    - For `1to0` (HBD output): referral is a portion of the HBD output, reducing user output accordingly.
 - **Fees**:
   - Base fee is tracked per-side but only HBD fees are claimable.
-  - `claim_fees`: consensus-only; withdraws HBD fees out of the contract (currently routed to `hive:vsc.dao`).
+  - `claim_fees`: consensus-only; withdraws HBD fees to `system:fr_balance`.
 - **LP management**: `transfer` LP, `burn` LP (reduces supply without withdrawing reserves).
 - **Safety & system params**:
   - `si_withdraw address,lpAmount`: consensus-only proportional withdrawal for emergencies.
@@ -36,6 +40,7 @@ The contract integrates with native assets via the SDK’s `HiveDraw`, `HiveTran
   - Compiles this package to TinyGo WASM, then executes: `init`, `add_liquidity`, HBD→volatile swap, sets slip params, volatile→HBD swap, and `claim_fees` (which withdraws HBD out of the contract). Validates balances, intents, and RC under the node harness.
   - From the repository root, run:
     - `cd go-vsc-node && go test ./modules/wasm/e2e -run TestAMM_Wasm_Init_Add_Swap_Claim -v`
+  - Referral paths are covered in unit tests in this folder.
 
 ### Capturing logs
 
@@ -46,5 +51,6 @@ cd go-vsc-node && go test ./modules/wasm/e2e -run TestAMM_Wasm_Init_Add_Swap_Cla
 ```
 
 The checked-in `test.log` corresponds to the most recent successful run of the above command.
+
 
 

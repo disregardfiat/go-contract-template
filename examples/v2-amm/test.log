@@ -1,63 +1,16 @@
-sdk types [{contracts.call {[i32] [i32]} 0} {db.set_object {[i32 i32] [i32]} 0} {db.get_object {[i32] [i32]} 0} {db.rm_object {[i32] [i32]} 0} {system.call {[i32 i32] [i32]} 0} {system.get_env_key {[i32] [i32]} 0} {system.get_env {[i32] [i32]} 0} {hive.get_balance {[i32 i32] [i32]} 0} {hive.draw {[i32 i32] [i32]} 0} {console.log {[i32] [i32]} 0} {hive.transfer {[i32 i32 i32] [i32]} 0} {hive.withdraw {[i32 i32 i32] [i32]} 0} {contracts.read {[i32] [i32]} 0}]
-=== RUN   TestAMM_Wasm_Init_Add_Swap_Claim
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-total gas cost: 759127
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 1000000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status hive:alice 1000000 100000
-Ledger get Current lol
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 2000000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status hive:alice 2000000 200000
-Ledger get Current lol
-total gas cost: 873766
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {6164645f6c69717569646974793130303030302c323030303030323032352d30392d30395432323a31313a31335a#in 0 0 0 hive:alice -100000 hbd  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {6164645f6c69717569646974793130303030302c323030303030323032352d30392d30395432323a31313a31335a#out 0 0 0 contract:v2amm 100000 hbd  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {6164645f6c69717569646974793130303030302c323030303030323032352d30392d30395432323a31313a31335a:1#in 0 0 0 hive:alice -200000 hive  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {6164645f6c69717569646974793130303030302c323030303030323032352d30392d30395432323a31313a31335a:1#out 0 0 0 contract:v2amm 200000 hive  transfer}]
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 100000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status hive:bob 100000 10000
-Ledger get Current lol
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 200000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status contract:v2amm 200000 18133
-Ledger get Current lol
-total gas cost: 810096
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617030746f312c3130303030323032352d30392d30395432323a31313a31335a#in 0 0 0 hive:bob -10000 hbd  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617030746f312c3130303030323032352d30392d30395432323a31313a31335a#out 0 0 0 contract:v2amm 10000 hbd  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617030746f312c3130303030323032352d30392d30395432323a31313a31335a:1#in 0 0 0 contract:v2amm -18133 hive  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617030746f312c3130303030323032352d30392d30395432323a31313a31335a:1#out 0 0 0  18133 hive  transfer}]
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-total gas cost: 764503
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 100000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status hive:carol 100000 10000
-Ledger get Current lol
-Ledger get Current lol
-[Prefix: contract-test] Debug: [Transfer - balAmt 110000 bh=0]
-[Prefix: contract-test] Debug: [ledgerSession.StartHeight 0 ledgerSystem.OpLogEvent.BlockHeight 0]
-Ledger.Status contract:v2amm 110000 5719
-Ledger get Current lol
-total gas cost: 811339
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617031746f302c3130303030323032352d30392d30395432323a31313a31335a#in 0 0 0 hive:carol -10000 hive  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617031746f302c3130303030323032352d30392d30395432323a31313a31335a#out 0 0 0 contract:v2amm 10000 hive  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617031746f302c3130303030323032352d30392d30395432323a31313a31335a:1#in 0 0 0 contract:v2amm -5719 hbd  transfer}]
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {7377617031746f302c3130303030323032352d30392d30395432323a31313a31335a:1#out 0 0 0  5719 hbd  transfer}]
-Ledger get Current lol
-wasm code: [0 97 115 109 1 0 0 0 1 158 3 45 96 3 127 127 127 1 127 96] len: 174133
-[Prefix: contract-test] Debug: [Withdraw - balAmt 104281 636c61696d5f66656573323032352d30392d30395432323a31313a31335a]
-total gas cost: 1007489
-[Prefix: contract-test] Debug: [LedgerSession.Done adding ledgerSystem.LedgerResult {636c61696d5f66656573323032352d30392d30395432323a31313a31335a#in 0 0 0 contract:v2amm -30 hbd  withdraw}]
-Ledger get Current lol
---- PASS: TestAMM_Wasm_Init_Add_Swap_Claim (3.54s)
+=== RUN   TestV2_Init_Add_Remove_Swap_Fees
+--- PASS: TestV2_Init_Add_Remove_Swap_Fees (0.00s)
+=== RUN   TestV2_Donate_Transfer_Burn_ClaimFees_System
+--- PASS: TestV2_Donate_Transfer_Burn_ClaimFees_System (0.00s)
+=== RUN   TestV2_SlipFee_And_NonHBDFeeRules
+--- PASS: TestV2_SlipFee_And_NonHBDFeeRules (0.00s)
+=== RUN   TestV2_Referral_Bounds_And_MinOut
+--- PASS: TestV2_Referral_Bounds_And_MinOut (0.00s)
+=== RUN   TestV2_BaseFeeZero_Referral_Paths
+--- PASS: TestV2_BaseFeeZero_Referral_Paths (0.00s)
+=== RUN   TestV2_InvalidDir_And_NonSystem_Claim
+--- PASS: TestV2_InvalidDir_And_NonSystem_Claim (0.00s)
+=== RUN   TestV2_Swap_Referral_Beneficiary
+--- PASS: TestV2_Swap_Referral_Beneficiary (0.00s)
 PASS
-ok  	vsc-node/modules/wasm/e2e	3.582s
+ok  	contract-template/examples/v2-amm	0.002s

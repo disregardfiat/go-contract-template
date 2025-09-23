@@ -31,7 +31,7 @@ var (
 // wasmimport-compatible function signatures
 func log(s *string) *string { return nil }
 
-func abort(msg *string) *string {
+func abort(msg, file *string, line, column *int32) {
 	panic(*msg)
 }
 
@@ -60,7 +60,36 @@ func stateDeleteObject(key *string) *string {
 	return nil
 }
 
-func getEnv(key *string) *string {
+// Return full JSON environment per sdk.GetEnv expectations
+func getEnv(_ *string) *string {
+	shimMu.RLock()
+	defer shimMu.RUnlock()
+
+	// parse auth arrays
+	var requiredAuths []string
+	var postingAuths []string
+	_ = json.Unmarshal([]byte(shimEnv["msg.required_auths"]), &requiredAuths)
+	_ = json.Unmarshal([]byte(shimEnv["msg.required_posting_auths"]), &postingAuths)
+
+	envObj := map[string]any{
+		"contract.id":                shimEnv["contract_id"],
+		"tx.id":                      shimEnv["anchor.id"],
+		"tx.index":                   0,
+		"tx.op_index":                0,
+		"block.id":                   shimEnv["anchor.block"],
+		"block.height":               0,
+		"block.timestamp":            shimEnv["anchor.timestamp"],
+		"msg.sender":                 shimEnv["msg.sender"],
+		"msg.required_auths":         requiredAuths,
+		"msg.required_posting_auths": postingAuths,
+	}
+	b, _ := json.Marshal(envObj)
+	s := string(b)
+	return &s
+}
+
+// Optional: return specific key values
+func getEnvKey(key *string) *string {
 	shimMu.RLock()
 	defer shimMu.RUnlock()
 	if v, ok := shimEnv[*key]; ok {

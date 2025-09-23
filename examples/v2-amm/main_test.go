@@ -225,3 +225,186 @@ func TestV2_SlipFee_And_NonHBDFeeRules(t *testing.T) {
 		t.Fatal("reserve1 should decrease")
 	}
 }
+
+func expectPanic(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic but none occurred")
+		}
+	}()
+	f()
+}
+
+func TestV2_Referral_Bounds_And_MinOut(t *testing.T) {
+	sdk.ShimReset()
+	sdk.ShimSetContractId("contract:v2")
+	sdk.ShimSetSender(sdk.Address("hive:lp"))
+	Init(sptr("hbd,hive,100")) // 1% base fee
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHbd, 1_000_000)
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHive, 1_000_000)
+	AddLiquidity(sptr("200000,200000"))
+
+	// refBps out of bounds should panic
+	sdk.ShimSetSender(sdk.Address("hive:trader"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader"), sdk.AssetHbd, 10000)
+	expectPanic(t, func() { _ = Swap(sptr("0to1,1000,,hive:ref,0")) })    // 0 invalid
+	expectPanic(t, func() { _ = Swap(sptr("0to1,1000,,hive:ref,1001")) }) // >1000 invalid
+
+	// Lower/upper bound valid
+	_ = Swap(sptr("0to1,1000,,hive:ref,1"))
+	_ = Swap(sptr("0to1,1000,,hive:ref,1000"))
+
+	// 1to0 minOut applies to net after referral
+	sdk.ShimSetSender(sdk.Address("hive:trader2"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader2"), sdk.AssetHive, 100000)
+	preR0 := uint64(getInt(keyReserve0))
+	preR1 := uint64(getInt(keyReserve1))
+	amtIn := uint64(5000)
+	// compute expected gross out
+	k := preR0 * preR1
+	gross := preR0 - (k / (preR1 + amtIn))
+	ref := gross * 100 / 10000 // 1%
+	net := gross - ref
+	// should pass when minOut == net
+	_ = Swap(sptr("1to0,5000," + strconv.FormatUint(net, 10) + ",hive:ref2,100"))
+	// should panic when minOut > net
+	expectPanic(t, func() {
+		_ = Swap(sptr("1to0,5000," + strconv.FormatUint(net+1, 10) + ",hive:ref2,100"))
+	})
+
+	// 0to1 minOut unaffected by referral (since paid from base fee). Just ensure no panic with high refBps.
+	sdk.ShimSetSender(sdk.Address("hive:trader3"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader3"), sdk.AssetHbd, 10000)
+	_ = Swap(sptr("0to1,1000,1,hive:ref3,1000"))
+}
+
+func TestV2_BaseFeeZero_Referral_Paths(t *testing.T) {
+	sdk.ShimReset()
+	sdk.ShimSetContractId("contract:v2")
+	sdk.ShimSetSender(sdk.Address("hive:lp"))
+	Init(sptr("hbd,hive,0")) // base fee 0
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHbd, 1_000_000)
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHive, 1_000_000)
+	AddLiquidity(sptr("100000,100000"))
+
+	// 0to1 with referral should not pay beneficiary when base fee = 0
+	sdk.ShimSetSender(sdk.Address("hive:trader"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader"), sdk.AssetHbd, 10000)
+	preRef := sdk.ShimGetBalance(sdk.Address("hive:ref"), sdk.AssetHbd)
+	_ = Swap(sptr("0to1,1000,,hive:ref,1000"))
+	if sdk.ShimGetBalance(sdk.Address("hive:ref"), sdk.AssetHbd) != preRef {
+		t.Fatal("referral should not be paid when base fee is 0 on 0to1")
+	}
+
+	// 1to0 with referral still pays from HBD out
+	sdk.ShimSetSender(sdk.Address("hive:trader2"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader2"), sdk.AssetHive, 10000)
+	preRef2 := sdk.ShimGetBalance(sdk.Address("hive:ref2"), sdk.AssetHbd)
+	_ = Swap(sptr("1to0,1000,,hive:ref2,1000"))
+	if sdk.ShimGetBalance(sdk.Address("hive:ref2"), sdk.AssetHbd) <= preRef2 {
+		t.Fatal("referral should be paid from HBD out on 1to0 even with base fee 0")
+	}
+}
+
+func TestV2_InvalidDir_And_NonSystem_Claim(t *testing.T) {
+	sdk.ShimReset()
+	sdk.ShimSetContractId("contract:v2")
+	sdk.ShimSetSender(sdk.Address("hive:lp"))
+	Init(sptr("hbd,hive,8"))
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHbd, 100000)
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHive, 100000)
+	AddLiquidity(sptr("50000,50000"))
+
+	// invalid dir should panic
+	sdk.ShimSetSender(sdk.Address("hive:trader"))
+	sdk.ShimSetBalance(sdk.Address("hive:trader"), sdk.AssetHbd, 10000)
+	expectPanic(t, func() { _ = Swap(sptr("bad,1000")) })
+
+	// non-system claim should panic
+	expectPanic(t, func() { _ = ClaimFees(nil) })
+
+	// system claim should succeed
+	sdk.ShimSetSender(sdk.Address("system:consensus"))
+	_ = ClaimFees(nil)
+}
+
+func TestV2_Swap_Referral_Beneficiary(t *testing.T) {
+	sdk.ShimReset()
+	sdk.ShimSetContractId("contract:v2")
+	sdk.ShimSetSender(sdk.Address("hive:lp"))
+	// base fee 100 bps (1%) for simpler math
+	Init(sptr("hbd,hive,100"))
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHbd, 1_000_000)
+	sdk.ShimSetBalance(sdk.Address("hive:lp"), sdk.AssetHive, 1_000_000)
+	AddLiquidity(sptr("100000,100000"))
+
+	// 0->1 with referral: referral paid from base fee (HBD), not from user output
+	sdk.ShimSetSender(sdk.Address("hive:bob"))
+	sdk.ShimSetBalance(sdk.Address("hive:bob"), sdk.AssetHbd, 20000)
+	preR0 := uint64(getInt(keyReserve0))
+	preR1 := uint64(getInt(keyReserve1))
+	amtIn := uint64(10_000)
+	refBps := uint64(100) // 1%
+	// form: dir,amountIn,minOut,beneficiary,refBps (minOut empty)
+	if Swap(sptr("0to1,"+strconv.FormatUint(amtIn, 10)+",,hive:ref,100")) != nil {
+		t.Fatal("swap referral 0->1 failed")
+	}
+	// Compute expected values
+	feeBps := getUint(keyBaseFeeBps) // 100
+	dxEff := amtIn * (10_000 - feeBps) / 10_000
+	k := preR0 * preR1
+	expectedDy := preR1 - (k / (preR0 + dxEff))
+	baseFeeAmt := amtIn - dxEff
+	refOut := baseFeeAmt * refBps / 10_000
+
+	// reserves reflect dxEff and expected user output (unchanged by referral)
+	if uint64(getInt(keyReserve0)) != preR0+dxEff {
+		t.Fatal("reserve0 not increased by dxEff with referral")
+	}
+	if uint64(getInt(keyReserve1)) != preR1-expectedDy {
+		t.Fatal("reserve1 not decreased by expected dy with referral")
+	}
+	// fee bucket reduced by referral payout
+	if getInt(keyFee0) != int64(baseFeeAmt-refOut) {
+		t.Fatalf("fee0 unexpected with referral: %d", getInt(keyFee0))
+	}
+	// beneficiary received HBD referral
+	if sdk.ShimGetBalance(sdk.Address("hive:ref"), sdk.AssetHbd) != int64(refOut) {
+		t.Fatal("beneficiary did not receive HBD referral share")
+	}
+
+	// 1->0 with referral: referral deducted from user HBD out
+	sdk.ShimSetSender(sdk.Address("hive:charlie"))
+	sdk.ShimSetBalance(sdk.Address("hive:charlie"), sdk.AssetHive, 50000)
+	preR0 = uint64(getInt(keyReserve0))
+	preR1 = uint64(getInt(keyReserve1))
+	amtIn = 10_000
+	refBps = 500 // 5%
+	if Swap(sptr("1to0,"+strconv.FormatUint(amtIn, 10)+",,hive:ref2,500")) != nil {
+		t.Fatal("swap referral 1->0 failed")
+	}
+	// No base fee, dxEff = amtIn
+	dxEff = amtIn
+	k = preR0 * preR1
+	grossDx := preR0 - (k / (preR1 + dxEff))
+	// slip params default 0 -> user total before referral equals grossDx
+	refOut2 := grossDx * refBps / 10_000
+	userNet := grossDx - refOut2
+
+	// reserves: r1 increases by amtIn, r0 decreases by total out (user + referral)
+	if uint64(getInt(keyReserve1)) != preR1+dxEff {
+		t.Fatal("reserve1 not increased by dxEff on 1->0 with referral")
+	}
+	if uint64(getInt(keyReserve0)) != preR0-grossDx {
+		t.Fatal("reserve0 not decreased by total output on 1->0 with referral")
+	}
+	// beneficiary received HBD referral
+	if sdk.ShimGetBalance(sdk.Address("hive:ref2"), sdk.AssetHbd) != int64(refOut2) {
+		t.Fatal("beneficiary did not receive HBD referral share on 1->0")
+	}
+	// user received remaining HBD
+	if sdk.ShimGetBalance(sdk.Address("hive:charlie"), sdk.AssetHbd) != int64(userNet) {
+		t.Fatal("user did not receive net HBD after referral")
+	}
+}

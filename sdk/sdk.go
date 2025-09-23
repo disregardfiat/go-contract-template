@@ -11,7 +11,10 @@ func Log(s string) {
 
 // Abort execution with an error message so callers can receive the reason.
 func Abort(msg string) {
-	abort(&msg)
+	file := ""
+	line := int32(0)
+	column := int32(0)
+	abort(&msg, &file, &line, &column)
 }
 
 // var envMap = []string{
@@ -42,8 +45,8 @@ func StateDeleteObject(key string) {
 
 // Get current execution environment variables
 func GetEnv() Env {
-	// Per-key lookups via system.getEnv
-	get := func(key string) string { return *getEnv(&key) }
+	// Per-key lookups via system.get_env_key
+	get := func(key string) string { return *getEnvKey(&key) }
 	env := Env{}
 	env.ContractId = get("contract_id")
 	env.TxId = get("anchor.id")
@@ -88,7 +91,7 @@ func GetEnv() Env {
 
 // Get current execution environment variable by a key
 // Deprecated: prefer GetEnv() which fetches keys individually
-func GetEnvKey(key string) *string { return getEnv(&key) }
+func GetEnvKey(key string) *string { return getEnvKey(&key) }
 
 // Get balance of an account
 func GetBalance(address Address, asset Asset) int64 {

@@ -132,12 +132,30 @@ func RemoveLiquidity(payload *string) *string {
 //go:wasmexport swap
 func Swap(payload *string) *string {
 	parts := strings.Split(strings.TrimSpace(*payload), ",")
-	assert(len(parts) == 2 || len(parts) == 3)
+	assert(len(parts) == 2 || len(parts) == 3 || len(parts) == 4 || len(parts) == 5)
 	dir := parts[0]
 	amountInU := parseUintStrict(parts[1])
 	minOutU := uint64(0)
-	if len(parts) == 3 && parts[2] != "" {
-		minOutU = parseUintStrict(parts[2])
+	var beneficiary sdk.Address
+	refBpsU := uint64(0)
+	if len(parts) == 3 {
+		// legacy form: dir,amountIn,minOut
+		if parts[2] != "" {
+			minOutU = parseUintStrict(parts[2])
+		}
+	} else if len(parts) == 4 {
+		// new form: dir,amountIn,beneficiary,refBps
+		beneficiary = sdk.Address(parts[2])
+		refBpsU = parseUintStrict(parts[3])
+		assert(refBpsU >= 1 && refBpsU <= 1000)
+	} else if len(parts) == 5 {
+		// new form with minOut: dir,amountIn,minOut,beneficiary,refBps
+		if parts[2] != "" {
+			minOutU = parseUintStrict(parts[2])
+		}
+		beneficiary = sdk.Address(parts[3])
+		refBpsU = parseUintStrict(parts[4])
+		assert(refBpsU >= 1 && refBpsU <= 1000)
 	}
 	assert(amountInU > 0)
 
@@ -195,11 +213,22 @@ func Swap(payload *string) *string {
 		setInt(keyReserve0, int64(r0+dxEff))
 		setInt(keyReserve1, int64(r1-dyUser))
 
-		// accrue base fee to HBD-side fee bucket only
+		// accrue base fee to HBD-side fee bucket only, with optional referral payout from base fee
 		if isHbd(asset0) {
-			fee := int64(amountInU - dxEff)
+			fee := uint64(amountInU - dxEff)
 			if fee > 0 {
-				setInt(keyFee0, getInt(keyFee0)+fee)
+				// optional referral share (paid in HBD) out of base fee
+				refOut := uint64(0)
+				if refBpsU > 0 {
+					refOut = fee * refBpsU / 10_000
+					if refOut > 0 {
+						transferAsset(beneficiary, int64(refOut), asset0)
+					}
+				}
+				feeRemain := int64(fee - refOut)
+				if feeRemain > 0 {
+					setInt(keyFee0, getInt(keyFee0)+feeRemain)
+				}
 			}
 		}
 
@@ -219,7 +248,7 @@ func Swap(payload *string) *string {
 		assert(dxOut > 0 && dxOut < r0)
 
 		// slippage-adjusted extra fee to LPs (reduce user output and keep in reserves)
-		dxUser := uint64(dxOut)
+		dxUserTotal := uint64(dxOut)
 		if shareSlipBps > 0 {
 			dxNominal := (r0 * dxEff) / r1
 			if dxNominal > 0 {
@@ -227,23 +256,37 @@ func Swap(payload *string) *string {
 				if slipBps > baselineSlipBps {
 					excess := slipBps - baselineSlipBps
 					outExtra := uint64(dxOut) * excess * shareSlipBps / 10_000 / 10_000
-					if outExtra >= dxUser {
-						outExtra = dxUser - 1
+					if outExtra >= dxUserTotal {
+						outExtra = dxUserTotal - 1
 					}
-					dxUser -= outExtra
+					dxUserTotal -= outExtra
 				}
 			}
 		}
 
-		assert(dxUser >= minOutU)
+		// optional referral share (paid in HBD) deducted from user output
+		refOut := uint64(0)
+		if refBpsU > 0 {
+			refOut = dxUserTotal * refBpsU / 10_000
+			if refOut >= dxUserTotal {
+				refOut = dxUserTotal - 1
+			}
+		}
 
-		// only effective input increases reserve
+		dxUserNet := dxUserTotal - refOut
+		assert(dxUserNet >= minOutU)
+
+		// only effective input increases reserve; reserve0 decreases by TOTAL HBD output (user + referral)
 		setInt(keyReserve1, int64(r1+dxEff))
-		setInt(keyReserve0, int64(r0-dxUser))
+		setInt(keyReserve0, int64(r0-dxUserTotal))
 
 		// no non-HBD fee accrual here
 
-		transferAsset(sdk.GetEnv().Sender.Address, int64(dxUser), asset0)
+		// send to beneficiary first if any, then to user
+		if refOut > 0 {
+			transferAsset(beneficiary, int64(refOut), asset0)
+		}
+		transferAsset(sdk.GetEnv().Sender.Address, int64(dxUserNet), asset0)
 	} else {
 		assert(false)
 	}
@@ -276,7 +319,7 @@ func Donate(payload *string) *string {
 //go:wasmexport claim_fees
 func ClaimFees(_ *string) *string {
 	assert(isSystemSender())
-	dao := sdk.Address("hive:vsc.dao")
+	dao := sdk.Address("system:fr_balance")
 	a0, a1 := getAssets()
 	f0 := getInt(keyFee0)
 	f1 := getInt(keyFee1)
